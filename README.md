@@ -72,4 +72,4 @@ Info.plist             — LSUIElement=true hides dock icon
 
 ## Author
 
-[ahmedmigo](https://github.com/ahmedmigo)
+[ahmedgenaidy](https://github.com/ahmedmigo)

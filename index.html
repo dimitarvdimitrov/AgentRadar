@@ -4,26 +4,30 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AgentRadar - macOS Menu Bar App for AI Agents</title>
-    <meta name="description" content="A native macOS menu bar app that monitors AI coding agents running in your terminals — Claude Code, Gemini CLI, Aider, and more.">
+    <meta name="description" content="A native macOS menu bar app that monitors AI coding agents running in your terminals.">
     
-    <!-- Tailwind CSS for styling -->
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- Heroicons for SVGs -->
+    <!-- Feather Icons -->
     <script src="https://unpkg.com/feather-icons"></script>
 
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
     <style>
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #0f172a; /* Slate 900 */
-            color: #f8fafc; /* Slate 50 */
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #0b0f19;
+            color: #f8fafc;
         }
         
+        .font-mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
         .gradient-text {
             background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
             -webkit-background-clip: text;
@@ -33,21 +37,177 @@
 
         .hero-glow {
             position: absolute;
-            width: 600px;
-            height: 600px;
-            background: radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, rgba(15, 23, 42, 0) 70%);
-            top: -200px;
+            width: 800px;
+            height: 800px;
+            background: radial-gradient(circle, rgba(56, 189, 248, 0.1) 0%, rgba(11, 15, 25, 0) 70%);
+            top: -300px;
             left: 50%;
             transform: translateX(-50%);
             z-index: -1;
             pointer-events: none;
         }
 
-        .glass-card {
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
+        /* Mac OS Window Simulation */
+        .mac-screen {
+            background: url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2400&auto=format&fit=crop') center/cover;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.1);
+        }
+
+        .mac-menu-bar {
+            background: rgba(30, 30, 30, 0.4);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .mac-dock {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .dock-icon-wrapper {
+            transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+            transform-origin: bottom;
+        }
+
+        .dock-icon-wrapper:hover {
+            transform: scale(1.3);
+            margin: 0 10px;
+        }
+
+        .dock-icon-wrapper:hover ~ .dock-icon-wrapper {
+            transform: scale(1.1);
+        }
+
+        /* Popover UI exactly matching screenshot */
+        .popover-container {
+            background: rgba(36, 36, 36, 0.95);
+            backdrop-filter: blur(30px);
+            -webkit-backdrop-filter: blur(30px);
             border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.5);
+            width: 340px;
+            border-radius: 12px;
+        }
+
+        .popover-header {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 12px 16px;
+        }
+
+        .popover-footer {
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 10px 16px;
+            background: rgba(30, 30, 30, 0.5);
+            border-bottom-left-radius: 12px;
+            border-bottom-right-radius: 12px;
+        }
+
+        .agent-item {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 14px 16px;
+            transition: background 0.15s;
+        }
+        
+        .agent-item:last-child {
+            border-bottom: none;
+        }
+
+        .agent-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        /* App Icons */
+        .app-icon-bg {
+            background: linear-gradient(180deg, #2a2a2a 0%, #1a1a1a 100%);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 2px 4px rgba(0,0,0,0.4);
+            border: 1px solid rgba(0,0,0,0.8);
+        }
+
+        .badge-icon {
+            box-shadow: 0 0 0 2px #242424;
+        }
+
+        /* Animations */
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+            70% { box-shadow: 0 0 0 4px rgba(34, 197, 94, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+        }
+        
+        .status-dot-active {
+            animation: pulse-green 2s infinite;
+        }
+
+        @keyframes shine {
+            0% { background-position: 200% center; }
+            100% { background-position: -200% center; }
+        }
+
+        .status-thinking {
+            background: linear-gradient(90deg, #94a3b8 0%, #ffffff 50%, #94a3b8 100%);
+            background-size: 200% auto;
+            color: transparent;
+            -webkit-background-clip: text;
+            background-clip: text;
+            animation: shine 2s linear infinite;
+            font-weight: 500;
+        }
+
+        .status-completed {
+            color: #9ca3af;
+        }
+
+        .status-approval {
+            color: #fb923c;
+        }
+
+        .approval-badge {
+            background: #f97316;
+            color: white;
+            font-size: 10px;
+            font-weight: bold;
+            min-width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 4px;
+        }
+
+        @keyframes subtle-bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-2px); }
+        }
+        
+        .working-icon {
+            animation: subtle-bounce 1s infinite;
+        }
+        
+        .menu-triangle {
+            position: absolute;
+            top: -8px;
+            right: 18px;
+            width: 0; 
+            height: 0; 
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-bottom: 8px solid rgba(255, 255, 255, 0.2);
+        }
+        .menu-triangle::after {
+            content: '';
+            position: absolute;
+            top: 1px;
+            left: -7px;
+            width: 0; 
+            height: 0; 
+            border-left: 7px solid transparent;
+            border-right: 7px solid transparent;
+            border-bottom: 7px solid rgba(36, 36, 36, 0.95);
         }
     </style>
 </head>
@@ -56,209 +216,320 @@
     <div class="hero-glow"></div>
 
     <!-- Navigation -->
-    <nav class="container mx-auto px-6 py-6 flex justify-between items-center">
+    <nav class="container mx-auto px-6 py-6 flex justify-between items-center z-10">
         <div class="flex items-center space-x-2">
-            <svg class="w-8 h-8 text-sky-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
-                <path d="M2 12h20"></path>
+            <svg class="w-8 h-8 text-sky-400" viewBox="0 0 62 63" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M21.1406 58.6484C21.5153 57.1994 22.9863 56.3298 24.4268 56.7061C25.6896 57.0361 26.9726 57.2682 28.2646 57.4033C28.8503 59.1888 29.3001 61.037 29.6016 62.9365C27.4018 62.8417 25.2125 62.5167 23.0713 61.957C21.6306 61.5802 20.7663 60.0981 21.1406 58.6484ZM44.0723 53.9512C45.3559 53.1925 47.0085 53.6246 47.7627 54.916C48.5163 56.2073 48.0868 57.8682 46.8037 58.627C43.259 60.7223 39.3385 62.0959 35.2666 62.667C34.6114 62.7589 33.9538 62.8271 33.2959 62.877C33.6045 60.952 34.0656 59.0798 34.666 57.2725C37.985 56.7878 41.1798 55.6609 44.0723 53.9512ZM0 33.3145C1.89926 33.6169 3.74709 34.0685 5.53223 34.6553C5.81595 36.9425 6.40484 39.1858 7.28516 41.3242C8.57211 44.4502 10.4589 47.2911 12.8369 49.6836C13.8894 50.7426 13.8892 52.4604 12.8369 53.5195C11.7842 54.5787 10.0762 54.5787 9.02344 53.5195C6.14512 50.6235 3.86252 47.1851 2.30469 43.4014C0.981708 40.1879 0.204533 36.778 0 33.3145ZM61.877 33.4902C61.6568 36.8933 60.8846 40.2423 59.584 43.4014C58.0261 47.1851 55.7436 50.6235 52.8652 53.5195C51.8125 54.5787 50.1045 54.5787 49.0518 53.5195C47.9994 52.4604 47.9993 50.7426 49.0518 49.6836C51.4297 47.2911 53.3166 44.4502 54.6035 41.3242C55.4374 39.2986 56.0065 37.1786 56.3057 35.0166C58.0989 34.3644 59.9604 33.852 61.877 33.4902ZM23.2891 47.6436C24.7267 49.6319 25.9628 51.776 26.9717 54.0459C25.5235 53.788 24.0999 53.3899 22.7217 52.8535C21.3334 52.3131 20.6429 50.7425 21.1797 49.3457C21.5409 48.4063 22.3657 47.7857 23.2891 47.6436ZM39.8125 47.3525C40.5535 47.5668 41.198 48.0983 41.5342 48.8633C42.1356 50.233 41.5205 51.8338 40.1592 52.4395C38.8218 53.0344 37.4334 53.4955 36.0146 53.8213C37.0549 51.5232 38.3318 49.3574 39.8125 47.3525ZM8.43164 35.749C10.9527 36.8293 13.3215 38.1911 15.501 39.7939C16.3105 41.3132 17.3388 42.7084 18.5547 43.9316C19.607 44.9908 19.6071 46.7075 18.5547 47.7666C17.502 48.8257 15.7949 48.8257 14.7422 47.7666C12.6146 45.626 10.9269 43.0849 9.77539 40.2881C9.17188 38.8222 8.72323 37.3007 8.43164 35.749ZM53.3574 36.2432C53.0668 37.6236 52.6526 38.9782 52.1133 40.2881C50.9618 43.0849 49.2731 45.626 47.1455 47.7666C46.0928 48.8254 44.3866 48.8255 43.334 47.7666C42.2816 46.7075 42.2816 44.9907 43.334 43.9316C44.1409 43.1197 44.8645 42.2314 45.4971 41.2822C47.8699 39.2778 50.51 37.5792 53.3574 36.2432ZM30.6279 16.6758C30.7641 15.7331 32.1248 15.733 32.2607 16.6758C33.3044 23.918 38.9952 29.6077 46.2373 30.6523C47.1798 30.7885 47.1801 32.1493 46.2373 32.2852C38.9945 33.3287 33.3044 39.0189 32.2607 46.2617C32.1249 47.2045 30.7643 47.2042 30.6279 46.2617C29.5834 39.0196 23.8935 33.3287 16.6514 32.2852C15.7086 32.1492 15.7087 30.7886 16.6514 30.6523C23.8933 29.6077 29.5833 23.9176 30.6279 16.6758ZM9.02344 9.41016C10.0761 8.35108 11.7842 8.35116 12.8369 9.41016C13.8895 10.4693 13.8896 12.188 12.8369 13.2471C10.459 15.6395 8.5721 18.4796 7.28516 21.6055C6.404 23.7459 5.81468 25.9918 5.53125 28.2812C3.74639 28.8681 1.89894 29.3194 0 29.6221C0.203974 26.1564 0.980927 22.7447 2.30469 19.5293C3.86258 15.7453 6.14491 12.3063 9.02344 9.41016ZM49.0518 9.41016C50.1045 8.35116 51.8126 8.35107 52.8652 9.41016C55.7438 12.3063 58.0261 15.7453 59.584 19.5293C60.8854 22.6903 61.6573 26.0411 61.877 29.4463C59.9611 29.0844 58.1004 28.572 56.3076 27.9199C56.0087 25.7557 55.4382 23.6331 54.6035 21.6055C53.3166 18.4796 51.4296 15.6395 49.0518 13.2471C47.9991 12.188 47.9992 10.4693 49.0518 9.41016ZM14.7422 15.165C15.7949 14.1059 17.502 14.1059 18.5547 15.165C19.607 16.2242 19.6071 17.9409 18.5547 19C17.3368 20.2253 16.3062 21.6223 15.4961 23.1445C13.3176 24.7463 10.9504 26.1077 8.43066 27.1875C8.72221 25.6341 9.17124 24.1111 9.77539 22.6436C10.9268 19.8468 12.6147 17.3056 14.7422 15.165ZM43.334 15.165C44.3867 14.1059 46.0928 14.106 47.1455 15.165C49.2731 17.3057 50.9618 19.8467 52.1133 22.6436C52.6532 23.9551 53.0687 25.3111 53.3594 26.6934C50.5142 25.3583 47.8763 23.6615 45.5049 21.6592C44.8706 20.706 44.144 19.8149 43.334 19C42.2814 17.9409 42.2815 16.2242 43.334 15.165ZM26.9717 8.8916C25.9407 11.2109 24.6713 13.3982 23.1934 15.4229C22.2125 15.3396 21.313 14.7194 20.9189 13.7383C20.3616 12.3496 21.028 10.769 22.4082 10.208C23.883 9.60853 25.4129 9.16925 26.9717 8.8916ZM36.0156 9.11426C37.3246 9.41483 38.6079 9.83102 39.8496 10.3613C41.22 10.9466 41.8591 12.5392 41.2773 13.918C40.9688 14.6491 40.378 15.1701 39.6875 15.4141C38.2597 13.4568 37.0266 11.3477 36.0156 9.11426ZM29.6016 0C29.3001 1.8995 28.8504 3.74769 28.2646 5.5332C28.0297 5.55776 27.795 5.58516 27.5605 5.61621C24.1865 6.0632 20.9326 7.17472 17.9854 8.88672C16.6962 9.6354 15.0482 9.19035 14.3037 7.89355C13.5598 6.59647 14.001 4.93831 15.29 4.18945C18.8505 2.12123 22.7813 0.778215 26.8574 0.238281C27.7696 0.117461 28.6854 0.0396032 29.6016 0ZM33.2959 0.0595703C35.2344 0.206367 37.1602 0.532411 39.0469 1.04102C40.4846 1.42876 41.3382 2.91763 40.9531 4.36426C40.5676 5.81061 39.0891 6.66955 37.6514 6.28223C36.6672 6.01693 35.6704 5.81074 34.666 5.66406C34.0656 3.85674 33.6045 1.98455 33.2959 0.0595703Z" fill="currentColor"/>
             </svg>
             <span class="text-xl font-bold tracking-tight">AgentRadar</span>
         </div>
         <div class="flex items-center space-x-6">
-            <a href="#features" class="text-slate-300 hover:text-white transition-colors text-sm font-medium">Features</a>
             <a href="https://github.com/ahmedmigo/AgentRadar" target="_blank" class="text-slate-300 hover:text-white transition-colors flex items-center space-x-1">
                 <i data-feather="github" class="w-5 h-5"></i>
-                <span class="text-sm font-medium hidden sm:inline">GitHub</span>
+                <span class="text-sm font-medium">View on GitHub</span>
+            </a>
+            <a href="https://github.com/ahmedmigo/AgentRadar/releases/latest" class="bg-white text-black hover:bg-slate-200 text-sm font-semibold py-2 px-4 rounded-lg transition-all">
+                Download
             </a>
         </div>
     </nav>
 
     <!-- Hero Section -->
-    <main class="container mx-auto px-6 flex-grow flex flex-col items-center justify-center py-20 text-center">
-        <div class="inline-flex items-center space-x-2 bg-slate-800/50 rounded-full px-4 py-1.5 border border-slate-700 mb-8">
-            <span class="flex h-2 w-2 relative">
-                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-                <span class="relative inline-flex rounded-full h-2 w-2 bg-sky-500"></span>
-            </span>
-            <span class="text-xs font-medium text-slate-300">Native macOS Menu Bar App</span>
-        </div>
+    <main class="container mx-auto px-6 flex-grow flex flex-col items-center pt-12 pb-24 text-center z-10">
         
-        <h1 class="text-5xl md:text-7xl font-extrabold tracking-tight mb-6 max-w-4xl">
-            Keep an eye on your <br/>
-            <span class="gradient-text">AI Coding Agents</span>
+        <h1 class="text-5xl md:text-6xl font-extrabold tracking-tight mb-6 max-w-4xl leading-tight">
+            See what your <br class="hidden sm:block"/>
+            <span class="gradient-text">AI Agents</span> are doing.
         </h1>
         
-        <p class="text-lg md:text-xl text-slate-400 mb-10 max-w-2xl mx-auto leading-relaxed">
-            A native macOS utility that lives in your menu bar and monitors Claude Code, Gemini CLI, Aider, and more running in your terminals. Never lose track of your AI assistants again.
+        <p class="text-lg text-slate-400 mb-12 max-w-2xl mx-auto leading-relaxed">
+            A native macOS menu bar app that tracks Cursor, Claude Code, Terminal agents, and more. 
+            Know exactly when tasks complete or need approval.
         </p>
-        
-        <div class="flex flex-col sm:flex-row items-center gap-4">
-            <!-- Replace href with actual download link when releasing -->
-            <a href="https://github.com/ahmedmigo/AgentRadar/releases/latest" class="bg-sky-500 hover:bg-sky-400 text-white font-semibold py-3 px-8 rounded-xl shadow-lg shadow-sky-500/30 transition-all flex items-center space-x-2 group">
-                <i data-feather="download" class="w-5 h-5 group-hover:-translate-y-1 transition-transform"></i>
-                <span>Download for macOS</span>
-            </a>
-            <a href="#features" class="bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold py-3 px-8 rounded-xl border border-slate-700 transition-all">
-                Learn More
-            </a>
-        </div>
-        <p class="mt-4 text-xs text-slate-500">Requires macOS 13.0+ • Free & Open Source</p>
 
-        <!-- Mockup / Preview Area -->
-        <div class="mt-20 w-full max-w-4xl mx-auto relative group">
-            <div class="absolute -inset-1 bg-gradient-to-r from-sky-500 to-indigo-500 rounded-2xl blur opacity-25 group-hover:opacity-40 transition duration-1000 group-hover:duration-200"></div>
-            <div class="relative glass-card rounded-2xl p-2 sm:p-4">
-                <div class="bg-slate-900 rounded-xl overflow-hidden border border-slate-800 shadow-2xl flex flex-col items-center py-10 px-4">
-                    <!-- Fake Mac Menu Bar -->
-                    <div class="w-64 h-8 bg-slate-800 rounded-md border border-slate-700 flex items-center justify-between px-3 mb-8 shadow-inner">
-                        <div class="flex space-x-2 text-slate-400 text-xs font-medium">
-                            <i data-feather="wifi" class="w-3 h-3"></i>
-                            <i data-feather="battery" class="w-3 h-3"></i>
+        <!-- Mac Screen Mockup -->
+        <div class="w-full max-w-5xl mx-auto relative rounded-2xl overflow-hidden mac-screen h-[600px] flex flex-col items-center">
+            
+            <!-- Menu Bar -->
+            <div class="w-full h-7 mac-menu-bar flex justify-between items-center px-4 text-[13px] font-medium text-white/90">
+                <div class="flex items-center space-x-4">
+                    <svg viewBox="0 0 384 512" class="w-3.5 h-3.5 fill-current"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+                    <span class="font-bold">AgentRadar</span>
+                    <span>File</span>
+                    <span>Edit</span>
+                    <span>View</span>
+                </div>
+                
+                <div class="flex items-center space-x-4 relative">
+                    <!-- Status icons -->
+                    <div class="flex items-center space-x-3 opacity-80">
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+                            <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+                            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+                            <line x1="12" y1="20" x2="12.01" y2="20"></line>
+                        </svg>
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                    </div>
+                    
+                    <!-- App Menu Bar Icon (Active State) -->
+                    <div class="bg-white/20 px-2 h-7 flex items-center rounded-sm cursor-pointer relative" id="menu-bar-wrapper">
+                        <div id="menu-bar-icon">
+                            <svg class="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                                <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                            </svg>
                         </div>
-                        <div class="flex items-center space-x-2 text-white text-xs">
-                            <span class="w-2 h-2 rounded-full bg-orange-500"></span> <!-- Needs attention icon simulation -->
-                            <i data-feather="activity" class="w-3 h-3 text-sky-400"></i>
-                            <span>10:42 AM</span>
+                        
+                        <!-- The Popover Dropdown -->
+                        <div class="absolute top-[32px] right-[-10px] popover-container text-left select-none text-white font-sans">
+                            <div class="menu-triangle"></div>
+                            
+                            <!-- Header -->
+                            <div class="popover-header flex justify-between items-center">
+                                <div class="flex items-center space-x-2">
+                                    <svg class="w-4 h-4 text-sky-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M4 12v.01M20 12v.01M12 4v.01M12 20v.01M16 12a4 4 0 0 1-8 0 4 4 0 0 1 8 0z"></path>
+                                        <path d="M18.36 5.64a9 9 0 0 1 0 12.72M5.64 5.64a9 9 0 0 0 0 12.72"></path>
+                                    </svg>
+                                    <span class="font-bold text-[13px]">Agent Radar</span>
+                                </div>
+                                <div class="flex items-center space-x-1.5 bg-white/5 px-2 py-0.5 rounded-full">
+                                    <span class="w-2 h-2 rounded-full bg-green-500 status-dot-active shadow-[0_0_8px_rgba(34,197,94,0.6)]"></span>
+                                    <span class="text-[11px] text-gray-300 font-medium">3 active</span>
+                                </div>
+                            </div>
+                            
+                            <!-- List -->
+                            <div class="flex flex-col">
+                                <!-- Agent 1: Cursor -->
+                                <div id="agent-1-item" class="agent-item flex items-center space-x-3">
+                                    <div class="relative">
+                                        <div class="w-10 h-10 rounded-lg overflow-hidden flex items-center justify-center border border-black/50 shadow-sm bg-black">
+                                            <img src="cursor-icon.png" alt="Cursor" class="w-full h-full object-cover">
+                                        </div>
+                                        <div id="agent-1-badge" class="absolute -bottom-1 -right-1 w-[18px] h-[18px] bg-[#1e1e1e] rounded-[4px] badge-icon flex items-center justify-center overflow-hidden">
+                                            <img src="claude-icon.png" alt="Claude" class="w-full h-full object-cover rounded-[4px]">
+                                        </div>
+                                    </div>
+                                    <div class="flex-grow min-w-0 flex flex-col justify-center h-10">
+                                        <div class="flex items-center text-[13px] leading-tight mb-0.5">
+                                            <span class="font-bold text-white mr-1.5">Cursor</span>
+                                            <span class="font-mono text-gray-400 text-[11px] truncate">AgentRadar</span>
+                                        </div>
+                                        <div id="agent-1-status" class="text-[12px] text-gray-400 leading-tight">Task completed</div>
+                                    </div>
+                                    <div class="flex flex-col items-end justify-between h-9 text-gray-400">
+                                        <span id="agent-1-time" class="text-[11px]">6m</span>
+                                        <svg class="w-3.5 h-3.5 hover:text-white cursor-pointer transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                                    </div>
+                                </div>
+
+                                <!-- Agent 2: Cursor -->
+                                <div id="agent-2-item" class="agent-item flex items-center space-x-3 bg-white/[0.03]">
+                                    <div class="relative">
+                                        <div class="w-10 h-10 rounded-lg overflow-hidden flex items-center justify-center border border-black/50 shadow-sm bg-black">
+                                            <img src="cursor-icon.png" alt="Cursor" class="w-full h-full object-cover">
+                                        </div>
+                                        <div id="agent-2-badge" class="absolute -bottom-1 -right-1 w-[18px] h-[18px] bg-[#1e1e1e] rounded-[4px] badge-icon flex items-center justify-center working-icon overflow-hidden">
+                                            <img src="claude-icon.png" alt="Claude" class="w-full h-full object-cover rounded-[4px]">
+                                        </div>
+                                    </div>
+                                    <div class="flex-grow min-w-0 flex flex-col justify-center h-10">
+                                        <div class="flex items-center text-[13px] leading-tight mb-0.5">
+                                            <span class="font-bold text-white mr-1.5">Cursor</span>
+                                            <span class="font-mono text-gray-400 text-[11px] truncate">connectors</span>
+                                        </div>
+                                        <div id="agent-2-status" class="text-[12px] status-thinking leading-tight">Thinking...</div>
+                                    </div>
+                                    <div class="flex flex-col items-end justify-between h-9 text-gray-400">
+                                        <span id="agent-2-time" class="text-[11px] text-sky-400 font-medium animate-pulse">Now</span>
+                                        <svg class="w-3.5 h-3.5 hover:text-white cursor-pointer transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                                    </div>
+                                </div>
+
+                                <!-- Agent 3: Terminal -->
+                                <div id="agent-3-item" class="agent-item flex items-center space-x-3">
+                                    <div class="relative">
+                                        <div class="w-10 h-10 flex items-center justify-center">
+                                            <img src="https://upload.wikimedia.org/wikipedia/commons/b/b3/Terminalicon2.png" alt="Terminal" class="w-9 h-9 object-contain drop-shadow-md">
+                                        </div>
+                                        <div id="agent-3-badge" class="absolute -bottom-1 -right-1 w-4 h-4 bg-transparent rounded-sm badge-icon flex items-center justify-center overflow-hidden">
+                                            <img src="gemini-icon.png" alt="Gemini" class="w-full h-full object-cover">
+                                        </div>
+                                    </div>
+                                    <div class="flex-grow min-w-0 flex flex-col justify-center h-10">
+                                        <div class="flex items-center text-[13px] leading-tight mb-0.5">
+                                            <span class="font-bold text-white mr-1.5">Terminal</span>
+                                            <span class="font-mono text-gray-400 text-[11px] truncate">ahmedgenaidy</span>
+                                        </div>
+                                        <div id="agent-3-status" class="text-[12px] text-gray-400 leading-tight">Ready</div>
+                                    </div>
+                                    <div class="flex flex-col items-end justify-between h-9 text-gray-400">
+                                        <span id="agent-3-time" class="text-[11px]">2h</span>
+                                        <svg class="w-3.5 h-3.5 hover:text-white cursor-pointer transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Footer -->
+                            <div class="popover-footer flex justify-between items-center text-gray-400 text-[12px]">
+                                <span>Agent Radar</span>
+                                <div class="flex items-center space-x-1.5 hover:text-white cursor-pointer transition-colors">
+                                    <span>Quit</span>
+                                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     
-                    <!-- Fake Popover -->
-                    <div class="w-full max-w-sm glass-card rounded-xl border border-slate-700 shadow-2xl text-left overflow-hidden">
-                        <div class="px-4 py-3 border-b border-slate-700/50 flex justify-between items-center bg-slate-800/50">
-                            <span class="font-semibold text-sm">AgentRadar</span>
-                            <span class="text-xs text-slate-400">2 Running</span>
-                        </div>
-                        <div class="p-3 space-y-2">
-                            <div class="bg-slate-800/80 p-3 rounded-lg border border-slate-700/50 flex items-start space-x-3 cursor-pointer hover:bg-slate-700/80 transition-colors">
-                                <div class="w-8 h-8 rounded-md bg-indigo-500/20 flex items-center justify-center flex-shrink-0 text-indigo-400">
-                                    <i data-feather="terminal" class="w-4 h-4"></i>
-                                </div>
-                                <div class="flex-grow min-w-0">
-                                    <div class="flex justify-between items-center mb-1">
-                                        <h4 class="text-sm font-medium text-white truncate">Claude Code</h4>
-                                        <span class="text-[10px] font-medium px-2 py-0.5 rounded text-orange-400 bg-orange-400/10 border border-orange-400/20">Needs Approval</span>
-                                    </div>
-                                    <p class="text-xs text-slate-400 truncate">Waiting to run `npm install`</p>
-                                    <div class="mt-2 flex items-center space-x-3 text-[10px] text-slate-500">
-                                        <span>CPU: 0.1%</span>
-                                        <span>Mem: 45MB</span>
-                                        <span>12m ago</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="bg-slate-800/80 p-3 rounded-lg border border-slate-700/50 flex items-start space-x-3 cursor-pointer hover:bg-slate-700/80 transition-colors">
-                                <div class="w-8 h-8 rounded-md bg-blue-500/20 flex items-center justify-center flex-shrink-0 text-blue-400">
-                                    <i data-feather="cpu" class="w-4 h-4"></i>
-                                </div>
-                                <div class="flex-grow min-w-0">
-                                    <div class="flex justify-between items-center mb-1">
-                                        <h4 class="text-sm font-medium text-white truncate">Aider</h4>
-                                        <span class="text-[10px] font-medium px-2 py-0.5 rounded text-sky-400 bg-sky-400/10 border border-sky-400/20">Working</span>
-                                    </div>
-                                    <p class="text-xs text-slate-400 truncate">Editing AgentMonitor.swift...</p>
-                                    <div class="mt-2 flex items-center space-x-3 text-[10px] text-slate-500">
-                                        <span>CPU: 12.4%</span>
-                                        <span>Mem: 120MB</span>
-                                        <span>2m ago</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    <span>Thu Mar 5  10:42 AM</span>
                 </div>
             </div>
+            
+            <!-- Window Content (Empty/Blurry Background) -->
+            <div class="flex-grow w-full flex items-center justify-center">
+                <!-- Decorative element in the background -->
+                <div class="text-white/20 font-bold text-8xl blur-sm select-none tracking-tighter mix-blend-overlay">Radar</div>
+            </div>
+
+            <!-- Dock -->
+            <div class="mb-4 px-3 py-2 mac-dock rounded-2xl flex items-center space-x-3 z-0">
+                
+                <!-- Finder -->
+                <div class="dock-icon-wrapper w-12 h-12 flex items-center justify-center relative cursor-pointer hover:drop-shadow-xl">
+                    <img src="finder-icon.png" alt="Finder" class="w-11 h-11 object-contain">
+                </div>
+                
+                <!-- Terminal -->
+                <div class="dock-icon-wrapper w-12 h-12 flex items-center justify-center relative cursor-pointer hover:drop-shadow-xl">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/b/b3/Terminalicon2.png" alt="Terminal" class="w-11 h-11 object-contain">
+                    <!-- Running dot -->
+                    <div class="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-1 h-1 bg-white/50 rounded-full"></div>
+                </div>
+
+                <!-- Cursor -->
+                <div class="dock-icon-wrapper w-12 h-12 flex items-center justify-center relative cursor-pointer hover:drop-shadow-xl bg-black rounded-[10px] shadow-sm border border-black/20 overflow-hidden">
+                    <img src="cursor-icon.png" alt="Cursor" class="w-full h-full object-cover">
+                    <!-- Running dot -->
+                    <div class="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-1 h-1 bg-white/80 rounded-full"></div>
+                </div>
+
+                <!-- VS Code -->
+                <div class="dock-icon-wrapper w-12 h-12 flex items-center justify-center relative cursor-pointer hover:drop-shadow-xl">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/Visual_Studio_Code_1.35_icon.svg/512px-Visual_Studio_Code_1.35_icon.svg.png" alt="VS Code" class="w-11 h-11 object-contain">
+                </div>
+
+                <div class="w-px h-10 bg-white/20 mx-1"></div>
+
+                <!-- Trash -->
+                <div class="dock-icon-wrapper w-12 h-12 flex items-center justify-center relative hover:drop-shadow-xl cursor-pointer">
+                    <img src="trash-icon.png" alt="Trash" class="w-11 h-11 object-contain">
+                </div>
+            </div>
+            
         </div>
     </main>
 
-    <!-- Features Section -->
-    <section id="features" class="py-24 bg-slate-900/50 border-t border-slate-800">
-        <div class="container mx-auto px-6">
-            <div class="text-center mb-16">
-                <h2 class="text-3xl font-bold mb-4">Everything you need to manage agents</h2>
-                <p class="text-slate-400 max-w-2xl mx-auto">AgentRadar automatically detects background AI processes and keeps you informed so you can focus on other things while they work.</p>
-            </div>
 
-            <div class="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
-                <!-- Feature 1 -->
-                <div class="glass-card p-6 rounded-2xl transition-all hover:-translate-y-1">
-                    <div class="w-12 h-12 bg-sky-500/20 rounded-xl flex items-center justify-center text-sky-400 mb-4">
-                        <i data-feather="eye" class="w-6 h-6"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold mb-2">Auto-Detection</h3>
-                    <p class="text-slate-400 text-sm leading-relaxed">Scans running processes every 2 seconds for known agents like Claude Code, Gemini CLI, Aider, Codex, and more.</p>
-                </div>
-
-                <!-- Feature 2 -->
-                <div class="glass-card p-6 rounded-2xl transition-all hover:-translate-y-1">
-                    <div class="w-12 h-12 bg-indigo-500/20 rounded-xl flex items-center justify-center text-indigo-400 mb-4">
-                        <i data-feather="bar-chart-2" class="w-6 h-6"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold mb-2">Live Status</h3>
-                    <p class="text-slate-400 text-sm leading-relaxed">Monitors CPU usage, memory consumption, uptime, working directories, and exact current activity per agent.</p>
-                </div>
-
-                <!-- Feature 3 -->
-                <div class="glass-card p-6 rounded-2xl transition-all hover:-translate-y-1">
-                    <div class="w-12 h-12 bg-orange-500/20 rounded-xl flex items-center justify-center text-orange-400 mb-4">
-                        <i data-feather="bell" class="w-6 h-6"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold mb-2">Smart Alerts</h3>
-                    <p class="text-slate-400 text-sm leading-relaxed">Native macOS notifications alert you immediately when an agent finishes its task or needs tool approval.</p>
-                </div>
-
-                <!-- Feature 4 -->
-                <div class="glass-card p-6 rounded-2xl transition-all hover:-translate-y-1">
-                    <div class="w-12 h-12 bg-emerald-500/20 rounded-xl flex items-center justify-center text-emerald-400 mb-4">
-                        <i data-feather="code" class="w-6 h-6"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold mb-2">Deep Integration</h3>
-                    <p class="text-slate-400 text-sm leading-relaxed">Reads Claude Code JSONL transcripts for hyper-accurate status, showing exact thinking steps and tool commands.</p>
-                </div>
-
-                <!-- Feature 5 -->
-                <div class="glass-card p-6 rounded-2xl transition-all hover:-translate-y-1">
-                    <div class="w-12 h-12 bg-purple-500/20 rounded-xl flex items-center justify-center text-purple-400 mb-4">
-                        <i data-feather="mouse-pointer" class="w-6 h-6"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold mb-2">Click to Focus</h3>
-                    <p class="text-slate-400 text-sm leading-relaxed">Click any agent row in the popover to instantly activate its specific terminal window and jump back into the action.</p>
-                </div>
-
-                <!-- Feature 6 -->
-                <div class="glass-card p-6 rounded-2xl transition-all hover:-translate-y-1">
-                    <div class="w-12 h-12 bg-rose-500/20 rounded-xl flex items-center justify-center text-rose-400 mb-4">
-                        <i data-feather="shield" class="w-6 h-6"></i>
-                    </div>
-                    <h3 class="text-xl font-semibold mb-2">Privacy First</h3>
-                    <p class="text-slate-400 text-sm leading-relaxed">Everything runs locally. It never reads terminal output directly or network traffic. No data ever leaves your machine.</p>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Footer -->
-    <footer class="border-t border-slate-800 py-10">
-        <div class="container mx-auto px-6 flex flex-col md:flex-row justify-between items-center text-sm text-slate-500">
-            <div class="mb-4 md:mb-0 flex items-center space-x-2">
-                <svg class="w-5 h-5 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
-                    <path d="M2 12h20"></path>
-                </svg>
-                <span>&copy; <script>document.write(new Date().getFullYear())</script> AgentRadar. Open source under MIT.</span>
-            </div>
-            <div class="flex space-x-6">
-                <a href="https://github.com/ahmedmigo" class="hover:text-white transition-colors">By @ahmedmigo</a>
-                <a href="https://github.com/ahmedmigo/AgentRadar" class="hover:text-white transition-colors">Source Code</a>
-            </div>
-        </div>
+    <footer class="border-t border-slate-800 py-8 text-center text-sm text-slate-500 z-10 relative bg-[#0b0f19]">
+        <p>Open source under MIT. Built for macOS.</p>
     </footer>
 
-    <!-- Initialize Feather Icons -->
     <script>
-      feather.replace()
+      feather.replace();
+
+      const agents = [
+          { id: 1, state: 'completed', timeInState: 0 },
+          { id: 2, state: 'thinking', timeInState: 0 },
+          { id: 3, state: 'idle', timeInState: 0 }
+      ];
+
+      function renderAgents() {
+          let approvalCount = 0;
+          let thinkingCount = 0;
+
+          agents.forEach(agent => {
+              const statusEl = document.getElementById(`agent-${agent.id}-status`);
+              const timeEl = document.getElementById(`agent-${agent.id}-time`);
+              const badgeEl = document.getElementById(`agent-${agent.id}-badge`);
+              const itemEl = document.getElementById(`agent-${agent.id}-item`);
+
+              if (agent.state === 'idle') {
+                  statusEl.className = 'text-[12px] status-completed leading-tight transition-colors duration-300';
+                  statusEl.textContent = 'Ready';
+                  timeEl.className = 'text-[11px] text-gray-400';
+                  timeEl.textContent = '2h';
+                  badgeEl.classList.remove('working-icon');
+                  itemEl.classList.remove('bg-white/[0.03]');
+              } else if (agent.state === 'thinking') {
+                  statusEl.className = 'text-[12px] status-thinking leading-tight';
+                  statusEl.textContent = 'Thinking...';
+                  timeEl.className = 'text-[11px] text-sky-400 font-medium animate-pulse';
+                  timeEl.textContent = 'Now';
+                  badgeEl.classList.add('working-icon');
+                  itemEl.classList.add('bg-white/[0.03]');
+                  thinkingCount++;
+              } else if (agent.state === 'approval') {
+                  statusEl.className = 'text-[12px] status-approval leading-tight font-medium';
+                  statusEl.textContent = 'Needs approval';
+                  timeEl.className = 'text-[11px] text-orange-400 font-medium animate-pulse';
+                  timeEl.textContent = 'Now';
+                  badgeEl.classList.add('working-icon');
+                  itemEl.classList.add('bg-white/[0.03]');
+                  approvalCount++;
+              } else if (agent.state === 'completed') {
+                  statusEl.className = 'text-[12px] status-completed leading-tight transition-colors duration-300';
+                  statusEl.textContent = 'Task completed';
+                  timeEl.className = 'text-[11px] text-gray-400';
+                  timeEl.textContent = 'Just now';
+                  badgeEl.classList.remove('working-icon');
+                  itemEl.classList.remove('bg-white/[0.03]');
+              }
+          });
+
+          const iconContainer = document.getElementById('menu-bar-icon');
+          if (approvalCount > 0) {
+              iconContainer.innerHTML = `<div class="approval-badge shadow-[0_0_8px_rgba(249,115,22,0.6)]">${approvalCount}</div>`;
+          } else if (thinkingCount > 0) {
+              iconContainer.innerHTML = `<svg class="w-4 h-4 text-white animate-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="8"></circle>
+              </svg>`;
+          } else {
+              iconContainer.innerHTML = `<svg class="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                  <polyline points="22 4 12 14.01 9 11.01"></polyline>
+              </svg>`;
+          }
+      }
+
+      setInterval(() => {
+          agents.forEach(agent => {
+              agent.timeInState++;
+              
+              if (agent.state === 'idle' && agent.timeInState > 4 && Math.random() > 0.4) {
+                  agent.state = 'thinking';
+                  agent.timeInState = 0;
+              } else if (agent.state === 'thinking' && agent.timeInState > 3) {
+                  if (Math.random() > 0.5) {
+                      agent.state = 'approval';
+                  } else {
+                      agent.state = 'completed';
+                  }
+                  agent.timeInState = 0;
+              } else if (agent.state === 'approval' && agent.timeInState > 4) {
+                  agent.state = 'thinking';
+                  agent.timeInState = 0;
+              } else if (agent.state === 'completed' && agent.timeInState > 6) {
+                  agent.state = 'idle';
+                  agent.timeInState = 0;
+              }
+          });
+          
+          renderAgents();
+      }, 1500);
+
+      renderAgents();
     </script>
 </body>
 </html>

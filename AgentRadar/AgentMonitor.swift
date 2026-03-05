@@ -301,9 +301,17 @@ class AgentMonitor: ObservableObject {
             agent.currentActivity = bestChild
             agent.lastActivity = Date()
         } else {
-            // Generic fallback: foreground + no active children = idle at prompt
-            agent.status = .idle
-            agent.currentActivity = "Ready"
+            // Check CPU of the entire process tree — Node-based CLIs do all work
+            // inside their own process without spawning children
+            let treeCPU = totalTreeCPU(for: agent.pid)
+            if treeCPU > 3.0 {
+                agent.status = .thinking
+                agent.currentActivity = "Thinking..."
+                agent.lastActivity = Date()
+            } else {
+                agent.status = .idle
+                agent.currentActivity = "Ready"
+            }
         }
     }
 
@@ -327,6 +335,10 @@ class AgentMonitor: ObservableObject {
 
         let staleness = Date().timeIntervalSince(mtime)
 
+        // Check if the agent process tree is actively using CPU
+        let treeCPU = totalTreeCPU(for: agent.pid)
+        let isActive = treeCPU > 3.0
+
         // Read recent lines and find the last assistant/user entry
         // (skip system/progress metadata lines that Claude appends after turns)
         guard let entry = readLastRelevantEntry(of: jsonlPath) else {
@@ -340,14 +352,12 @@ class AgentMonitor: ObservableObject {
         switch msgType {
         case "assistant":
             if stopReason == "end_turn" {
-                // Agent finished its turn — task complete, no action needed
-                // (this includes optional feedback prompts like "How is Claude doing?")
                 agent.pendingToolCall = nil
                 return (.completed, "Task completed")
             } else if stopReason == "tool_use" {
                 // Agent wants to use a tool
-                if staleness < 3 {
-                    // File was just updated — tool is actively executing
+                if staleness < 3 || isActive {
+                    // File was just updated or agent is actively working
                     agent.pendingToolCall = nil
                     return (.thinking, "Running tool...")
                 } else {
@@ -366,12 +376,12 @@ class AgentMonitor: ObservableObject {
                     return (.needsAttention, "Waiting for tool approval")
                 }
             } else {
-                // stop_reason is null — still streaming response
+                // stop_reason is null — still streaming or waiting for API
                 agent.pendingToolCall = nil
-                if staleness < 15 {
+                if staleness < 30 || isActive {
                     return (.thinking, "Thinking...")
                 } else {
-                    // Streaming stopped without end_turn — likely waiting
+                    // Stale and no CPU — likely done or stalled
                     return (.completed, "Task completed")
                 }
             }
@@ -379,10 +389,9 @@ class AgentMonitor: ObservableObject {
         case "user":
             // User sent a message or tool result — agent is working
             agent.pendingToolCall = nil
-            if staleness < 15 {
+            if staleness < 30 || isActive {
                 return (.thinking, "Thinking...")
             } else {
-                // Agent should have responded by now
                 return (.running, "Active")
             }
 
@@ -596,6 +605,23 @@ class AgentMonitor: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Sum CPU% for a process and all its descendants
+    private func totalTreeCPU(for pid: Int32) -> Double {
+        let output = shell("ps -p \(pid) -o %cpu= 2>/dev/null")
+        var total = Double(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+
+        let childPids = shell("pgrep -P \(pid) 2>/dev/null")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !childPids.isEmpty {
+            for line in childPids.components(separatedBy: "\n") {
+                if let childPid = Int32(line.trimmingCharacters(in: .whitespaces)) {
+                    total += totalTreeCPU(for: childPid)
+                }
+            }
+        }
+        return total
+    }
 
     private func getWorkingDirectory(for pid: Int32) -> String {
         let output = shell("lsof -p \(pid) -a -d cwd -Fn 2>/dev/null")
