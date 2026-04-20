@@ -493,23 +493,39 @@ class AgentMonitor: ObservableObject {
     /// Walk the parent process chain to find the PID of the .app bundle that owns this terminal
     private func findOwnerAppPID(pid: Int32) -> pid_t? {
         var current = pid
+        var bestMatch: pid_t?
+
         for _ in 0..<15 {
+            if let app = activatableApp(for: current) {
+                bestMatch = app.processIdentifier
+            }
+
             let info = shell("ps -p \(current) -o ppid=,args= 2>/dev/null")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !info.isEmpty else { return nil }
+            guard !info.isEmpty else { return bestMatch }
             let parts = info.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            guard parts.count >= 2 else { return nil }
-            guard let ppid = Int32(parts[0].trimmingCharacters(in: .whitespaces)) else { return nil }
+            guard parts.count >= 2 else { return bestMatch }
+            guard let ppid = Int32(parts[0].trimmingCharacters(in: .whitespaces)) else { return bestMatch }
             let cmd = String(parts[1])
 
-            // Found a .app bundle — return THIS process's PID (current), not its parent
+            // Terminal apps like Warp can insert helper processes (for example
+            // terminal-server) between the CLI and the actual focusable app.
+            // Prefer a real activatable NSRunningApplication when we hit the
+            // bundle boundary, otherwise fall back to the nearest match found
+            // higher in the chain.
             if cmd.contains(".app/") || cmd.contains(".app ") {
-                return current
+                if let app = activatableApp(for: current) {
+                    return app.processIdentifier
+                }
+                if let app = activatableApp(for: ppid) {
+                    return app.processIdentifier
+                }
+                return bestMatch
             }
-            if ppid <= 1 { return nil }
+            if ppid <= 1 { return bestMatch }
             current = ppid
         }
-        return nil
+        return bestMatch
     }
 
     // MARK: - Window Activation
@@ -559,52 +575,96 @@ class AgentMonitor: ObservableObject {
         AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         app.activate(options: [.activateIgnoringOtherApps])
 
-        // Find the matching window and raise it
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windows = windowsRef as? [AXUIElement] else { return }
-
-        for window in windows {
-            var titleRef: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
-                  let title = titleRef as? String else { continue }
-
-            if title.localizedCaseInsensitiveContains(folderName) {
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-                return
-            }
+        let windows = axWindows(for: axApp)
+        if let window = windows.first(where: { windowMatches($0, folderName: folderName) }) ?? windows.first {
+            raiseAXWindow(window)
         }
-
-        // No matching window found — just activate the app
     }
 
     /// Walk parent chain and return the human-readable app name (e.g. "Cursor", "Terminal")
     private func findOwnerAppName(pid: Int32) -> String? {
         var current = pid
+        var bestMatch: String?
+
         for _ in 0..<15 {
+            if let app = activatableApp(for: current), let name = app.localizedName {
+                bestMatch = name
+            }
+
             let info = shell("ps -p \(current) -o ppid=,args= 2>/dev/null")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !info.isEmpty else { return nil }
+            guard !info.isEmpty else { return bestMatch }
             let parts = info.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            guard parts.count >= 2 else { return nil }
-            guard let ppid = Int32(parts[0].trimmingCharacters(in: .whitespaces)) else { return nil }
+            guard parts.count >= 2 else { return bestMatch }
+            guard let ppid = Int32(parts[0].trimmingCharacters(in: .whitespaces)) else { return bestMatch }
             let cmd = String(parts[1])
 
             if cmd.contains(".app/") || cmd.contains(".app ") {
+                if let app = activatableApp(for: current), let name = app.localizedName {
+                    return name
+                }
+                if let app = activatableApp(for: ppid), let name = app.localizedName {
+                    return name
+                }
                 // Extract "AppName" from "/Applications/AppName.app/..."
                 if let range = cmd.range(of: #"[^/]+\.app"#, options: .regularExpression) {
                     return String(cmd[range]).replacingOccurrences(of: ".app", with: "")
                 }
-                return nil
+                return bestMatch
             }
-            if ppid <= 1 { return nil }
+            if ppid <= 1 { return bestMatch }
             current = ppid
         }
-        return nil
+        return bestMatch
     }
 
     // MARK: - Helpers
+
+    private func activatableApp(for pid: pid_t) -> NSRunningApplication? {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return nil }
+        guard app.bundleURL?.pathExtension == "app" else { return nil }
+        return app
+    }
+
+    private func axWindows(for app: AXUIElement) -> [AXUIElement] {
+        var windows: [AXUIElement] = []
+
+        for attribute in [kAXWindowsAttribute, kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(app, attribute as CFString, &value) == .success else { continue }
+
+            if let elements = value as? [AXUIElement] {
+                for element in elements where !windows.contains(where: { CFEqual($0, element) }) {
+                    windows.append(element)
+                }
+            } else if CFGetTypeID(value) == AXUIElementGetTypeID() {
+                let element = unsafeBitCast(value, to: AXUIElement.self)
+                guard !windows.contains(where: { CFEqual($0, element) }) else { continue }
+                windows.append(element)
+            }
+        }
+
+        return windows
+    }
+
+    private func windowMatches(_ window: AXUIElement, folderName: String) -> Bool {
+        let attributes = [kAXTitleAttribute, kAXDocumentAttribute]
+        for attribute in attributes {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, attribute as CFString, &value) == .success,
+                  let text = value as? String else { continue }
+            if text.localizedCaseInsensitiveContains(folderName) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func raiseAXWindow(_ window: AXUIElement) {
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    }
 
     /// Sum CPU% for a process and all its descendants
     private func totalTreeCPU(for pid: Int32) -> Double {
