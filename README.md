@@ -4,7 +4,7 @@ A native macOS menu bar app that monitors AI coding agents running in your termi
 
 ## What it does
 
-- **Lives in your menu bar** — icon changes based on agent status: working, completed, needs attention, or idle
+- **Lives in your menu bar** — shows a compact breakdown of needs input, in progress, and ready sessions
 - **Auto-detects agents** — scans running processes every 2 seconds for known AI coding agents
 - **Shows live status** — CPU, memory, uptime, working directory, and current activity per agent
 - **Claude Code deep integration** — reads JSONL transcripts for accurate status (thinking, tool approval, task completed)
@@ -26,6 +26,12 @@ A native macOS menu bar app that monitors AI coding agents running in your termi
 To add more: edit `KnownAgent.all` in `AgentMonitor.swift`.
 
 ## Menu Bar Icons
+
+The menu bar icon uses:
+
+- `orange` — needs input / attention
+- `green` — in progress
+- `blue` — ready (completed + idle)
 
 | Icon | Meaning |
 |------|---------|

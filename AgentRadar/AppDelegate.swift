@@ -2,6 +2,28 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
+struct MenuBarStatusSummary {
+    let attention: Int
+    let working: Int
+    let completed: Int
+    let idle: Int
+
+    static let empty = Self(attention: 0, working: 0, completed: 0, idle: 0)
+
+    var total: Int {
+        attention + working + completed + idle
+    }
+
+    var ready: Int {
+        completed + idle
+    }
+
+    func tooltip() -> String {
+        guard total > 0 else { return "No sessions detected" }
+        return "Needs Input: \(attention) • In Progress: \(working) • Ready: \(ready)"
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
@@ -9,6 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var animationTimer: Timer?
     var animFrame = 0
     var isAnimating = false
+    var latestSummary = MenuBarStatusSummary.empty
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
@@ -16,11 +39,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        updateStatusBar(attention: 0, working: 0, completed: 0, idle: 0)
+        updateStatusBar(summary: latestSummary)
 
         if let button = statusItem?.button {
             button.action = #selector(togglePopover)
             button.target = self
+            button.imagePosition = .imageOnly
         }
 
         popover = NSPopover()
@@ -49,64 +73,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let completed = agents.filter { $0.status == .completed }
         let idle = agents.filter { $0.status == .idle }
 
-        updateStatusBar(attention: needsAttention.count, working: working.count, completed: completed.count, idle: idle.count)
+        latestSummary = MenuBarStatusSummary(
+            attention: needsAttention.count,
+            working: working.count,
+            completed: completed.count,
+            idle: idle.count
+        )
+        refreshStatusBar()
     }
 
-    func updateStatusBar(attention: Int, working: Int, completed: Int, idle: Int) {
-        guard let button = statusItem?.button else { return }
+    func refreshStatusBar() {
+        updateStatusBar(summary: latestSummary)
+    }
 
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+    func updateStatusBar(summary: MenuBarStatusSummary) {
+        guard let button = statusItem?.button else { return }
 
         button.title = ""
         button.attributedTitle = NSAttributedString(string: "")
+        button.toolTip = summary.tooltip()
+        button.setAccessibilityLabel(summary.tooltip())
 
         // Stop animation by default; re-start below if needed
-        let shouldAnimate = working > 0
+        let shouldAnimate = summary.working > 0
 
-        if attention > 0 {
-            stopAnimation()
-            let symbolName = attention <= 50 ? "\(attention).circle.fill" : "exclamationmark.circle.fill"
-            if let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Needs Attention")?.withSymbolConfiguration(config) {
-                let size = symbol.size
-                let img = NSImage(size: size, flipped: false) { rect in
-                    NSColor.systemOrange.set()
-                    symbol.draw(in: rect)
-                    NSGraphicsContext.current?.cgContext.setBlendMode(.sourceIn)
-                    NSGraphicsContext.current?.cgContext.fill(rect)
-                    return true
-                }
-                img.isTemplate = false
-                button.image = constrainToMenuBar(img)
-            }
-            button.contentTintColor = nil
-            button.alphaValue = 1.0
-        } else if working > 0 {
-            button.contentTintColor = nil
-            button.alphaValue = 1.0
-            // Render initial frame; animation timer handles the rest
+        if shouldAnimate {
             renderAnimatedIcon(for: button)
             if !isAnimating { startAnimation() }
-        } else if completed > 0 {
-            stopAnimation()
-            let img = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Completed")?.withSymbolConfiguration(config)
-            img?.isTemplate = true
-            button.image = constrainToMenuBar(img)
-            button.contentTintColor = nil
-            button.alphaValue = 0.8
-        } else if idle > 0 {
-            stopAnimation()
-            let img = compositeIcon(innerAlpha: 1.0, outerAlpha: 1.0)
-            img?.isTemplate = true
-            button.image = constrainToMenuBar(img)
-            button.contentTintColor = nil
-            button.alphaValue = 0.7
         } else {
-            stopAnimation()
-            let img = compositeIcon(innerAlpha: 1.0, outerAlpha: 1.0)
-            img?.isTemplate = true
-            button.image = constrainToMenuBar(img)
-            button.contentTintColor = nil
-            button.alphaValue = 0.4
+            if isAnimating { stopAnimation() }
+            renderBreakdownIcon(for: button, animated: false)
         }
 
         if !shouldAnimate && isAnimating {
@@ -140,6 +136,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return original
     }
 
+    func renderBreakdownIcon(for button: NSStatusBarButton, animated: Bool) {
+        let img = makeBreakdownIcon(animated: animated)
+        img?.isTemplate = false
+        button.image = constrainToMenuBar(img)
+        button.contentTintColor = nil
+        button.alphaValue = latestSummary.total > 0 ? 1.0 : 0.55
+    }
+
+    func makeBreakdownIcon(animated: Bool) -> NSImage? {
+        let barWidth: CGFloat = 4
+        let gap: CGFloat = 2.5
+        let trackHeight: CGFloat = 14
+        let size = NSSize(width: 17, height: 18)
+
+        let metrics: [(count: Int, color: NSColor)] = [
+            (latestSummary.attention, .systemOrange),
+            (latestSummary.working, .systemGreen),
+            (latestSummary.ready, .systemBlue),
+        ]
+        let maxCount = max(metrics.map(\.count).max() ?? 0, 1)
+        let pulse = animated ? (0.7 + 0.3 * ((sin(CGFloat(animFrame) * 0.3) + 1) / 2)) : 1.0
+
+        let total = latestSummary.total
+
+        return NSImage(size: size, flipped: false) { rect in
+            let totalWidth = (barWidth * CGFloat(metrics.count)) + (gap * CGFloat(metrics.count - 1))
+            let startX = (rect.width - totalWidth) / 2
+            let startY: CGFloat = 2
+
+            if total == 0 {
+                for index in metrics.indices {
+                    let x = startX + CGFloat(index) * (barWidth + gap)
+                    let placeholderRect = CGRect(x: x, y: startY + 6, width: barWidth, height: 8)
+                    let placeholderPath = NSBezierPath(
+                        roundedRect: placeholderRect,
+                        xRadius: barWidth / 2,
+                        yRadius: barWidth / 2
+                    )
+                    NSColor.tertiaryLabelColor.withAlphaComponent(0.22).setFill()
+                    placeholderPath.fill()
+                }
+
+                return true
+            }
+
+            for (index, metric) in metrics.enumerated() {
+                guard metric.count > 0 else { continue }
+
+                let x = startX + CGFloat(index) * (barWidth + gap)
+                let ratio = CGFloat(metric.count) / CGFloat(maxCount)
+                let fillHeight = max(4, 4 + ((trackHeight - 4) * ratio))
+                let fillRect = CGRect(
+                    x: x,
+                    y: startY + (trackHeight - fillHeight),
+                    width: barWidth,
+                    height: fillHeight
+                )
+                let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: barWidth / 2, yRadius: barWidth / 2)
+                let alpha = index == 1 ? pulse : 1.0
+                metric.color.withAlphaComponent(alpha).setFill()
+                fillPath.fill()
+            }
+
+            return true
+        }
+    }
+
     // MARK: - Animation
 
     func startAnimation() {
@@ -161,22 +224,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func renderAnimatedIcon(for button: NSStatusBarButton) {
-        // Wave effect: inner ring pulses first, outer ring follows with a delay
-        // Full cycle = ~1.8 seconds
-        let t = Double(animFrame) * 0.05
-        let cycleDuration = 1.8
-
-        // Inner ring leads, outer ring follows with 0.4s offset
-        let innerPhase = t.truncatingRemainder(dividingBy: cycleDuration) / cycleDuration
-        let outerPhase = (t - 0.4).truncatingRemainder(dividingBy: cycleDuration) / cycleDuration
-
-        // Smooth pulse: 0.15 → 1.0 → 0.15
-        let innerAlpha = CGFloat(0.15 + 0.85 * max(0, sin(innerPhase * .pi)))
-        let outerAlpha = CGFloat(0.15 + 0.85 * max(0, sin(outerPhase * .pi)))
-
-        let img = compositeIcon(innerAlpha: innerAlpha, outerAlpha: outerAlpha)
-        img?.isTemplate = true
-        button.image = constrainToMenuBar(img)
+        renderBreakdownIcon(for: button, animated: true)
     }
 
     // MARK: - Notifications
