@@ -72,6 +72,18 @@ class DetectedAgent: ObservableObject, Identifiable {
         return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
     }
 
+    var lastActivityString: String {
+        let seconds = Int(Date().timeIntervalSince(lastActivity))
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 600 {
+            return "\(seconds / 60)m\(seconds % 60)s"
+        }
+        if seconds < 86400 {
+            return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
+        }
+        return lastActivity.formatted(date: .abbreviated, time: .shortened)
+    }
+
     init(pid: Int32, kind: KnownAgent, workingDirectory: String, commandLine: String, tty: String) {
         self.id = "\(pid)"
         self.pid = pid
