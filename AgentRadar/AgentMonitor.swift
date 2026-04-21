@@ -38,6 +38,30 @@ struct KnownAgent {
     ]
 }
 
+private struct DetectedAgentSnapshot {
+    let pid: Int32
+    let kind: KnownAgent
+    let cwd: String
+    let cmd: String
+    let tty: String
+    var gitBranch: String?
+    var gitRepoRoot: String?
+}
+
+private struct GitRepoCacheEntry {
+    let repoRoot: String
+    let gitDir: String
+    var branch: String?
+    var headSignature: String?
+    var lastCheckedAt: Date
+}
+
+private struct GitLookupCacheEntry {
+    let repoKey: String?
+    let isNonGit: Bool
+    let expiresAt: Date?
+}
+
 // MARK: - Detected Agent
 
 class DetectedAgent: ObservableObject, Identifiable {
@@ -59,6 +83,8 @@ class DetectedAgent: ObservableObject, Identifiable {
     @Published var appIcon: NSImage?
     @Published var appName: String?
     @Published var pendingToolCall: PendingToolCall?
+    @Published var gitBranch: String?
+    @Published var gitRepoRoot: String?
 
     var displayName: String {
         let dir = URL(fileURLWithPath: workingDirectory).lastPathComponent
@@ -70,18 +96,6 @@ class DetectedAgent: ObservableObject, Identifiable {
         if seconds < 60 { return "\(seconds)s" }
         if seconds < 3600 { return "\(seconds / 60)m" }
         return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
-    }
-
-    var lastActivityString: String {
-        let seconds = Int(Date().timeIntervalSince(lastActivity))
-        if seconds < 60 { return "\(seconds)s" }
-        if seconds < 600 {
-            return "\(seconds / 60)m\(seconds % 60)s"
-        }
-        if seconds < 86400 {
-            return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
-        }
-        return lastActivity.formatted(date: .abbreviated, time: .shortened)
     }
 
     init(pid: Int32, kind: KnownAgent, workingDirectory: String, commandLine: String, tty: String) {
@@ -106,6 +120,9 @@ class AgentMonitor: ObservableObject {
     var onUpdate: (([DetectedAgent]) -> Void)?
     private var timer: Timer?
     private var knownPIDs: Set<Int32> = []
+    private var gitRepoCache: [String: GitRepoCacheEntry] = [:]
+    private var gitLookupCache: [String: GitLookupCacheEntry] = [:]
+    private let nonGitCacheTTL: TimeInterval = 10
 
     func start() {
         scan()
@@ -122,7 +139,7 @@ class AgentMonitor: ObservableObject {
     private func scan() {
         DispatchQueue.global(qos: .background).async { [weak self] in
             guard let self = self else { return }
-            let found = self.detectAgents()
+            let found = self.resolveGitContext(for: self.detectAgents())
 
             DispatchQueue.main.async {
                 self.reconcile(found)
@@ -134,8 +151,8 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Layer 1: Detect agents via pgrep
 
-    private func detectAgents() -> [(pid: Int32, kind: KnownAgent, cwd: String, cmd: String, tty: String)] {
-        var results: [(pid: Int32, kind: KnownAgent, cwd: String, cmd: String, tty: String)] = []
+    private func detectAgents() -> [DetectedAgentSnapshot] {
+        var results: [DetectedAgentSnapshot] = []
         let myPID = ProcessInfo.processInfo.processIdentifier
         var seenPIDs = Set<Int32>()
 
@@ -177,7 +194,15 @@ class AgentMonitor: ObservableObject {
 
                 let cmd = parts.count >= 3 ? String(parts[2]) : agent.binaryName
                 let cwd = getWorkingDirectory(for: pid)
-                results.append((pid: pid, kind: agent, cwd: cwd, cmd: cmd, tty: tty))
+                results.append(
+                    DetectedAgentSnapshot(
+                        pid: pid,
+                        kind: agent,
+                        cwd: cwd,
+                        cmd: cmd,
+                        tty: tty
+                    )
+                )
                 seenPIDs.insert(pid)
             }
         }
@@ -186,8 +211,9 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Reconcile
 
-    private func reconcile(_ found: [(pid: Int32, kind: KnownAgent, cwd: String, cmd: String, tty: String)]) {
+    private func reconcile(_ found: [DetectedAgentSnapshot]) {
         let foundPIDs = Set(found.map { $0.pid })
+        let foundByPID = Dictionary(uniqueKeysWithValues: found.map { ($0.pid, $0) })
 
         // Remove dead agents
         agents.removeAll { !foundPIDs.contains($0.pid) }
@@ -214,9 +240,20 @@ class AgentMonitor: ObservableObject {
                         agent.appIcon = workspace.icon(forFile: path)
                     }
                 }
+                agent.gitBranch = item.gitBranch
+                agent.gitRepoRoot = item.gitRepoRoot
                 agents.append(agent)
                 knownPIDs.insert(item.pid)
             }
+        }
+
+        for agent in agents {
+            guard let item = foundByPID[agent.pid] else { continue }
+            agent.workingDirectory = item.cwd
+            agent.commandLine = item.cmd
+            agent.tty = item.tty
+            agent.gitBranch = item.gitBranch
+            agent.gitRepoRoot = item.gitRepoRoot
         }
 
         // Update stats for all agents
@@ -233,6 +270,137 @@ class AgentMonitor: ObservableObject {
 
         // Clean up dead PIDs
         knownPIDs = knownPIDs.intersection(foundPIDs)
+    }
+
+    // MARK: - Git Context
+
+    private func resolveGitContext(for detections: [DetectedAgentSnapshot]) -> [DetectedAgentSnapshot] {
+        detections.map { detection in
+            var detection = detection
+            if let gitContext = gitContext(for: detection.cwd) {
+                detection.gitBranch = gitContext.branch
+                detection.gitRepoRoot = gitContext.repoRoot
+            }
+            return detection
+        }
+    }
+
+    private func gitContext(for workingDirectory: String) -> (branch: String?, repoRoot: String)? {
+        let normalizedPath = normalizePath(workingDirectory)
+        guard normalizedPath.hasPrefix("/") else { return nil }
+
+        let now = Date()
+
+        if let lookup = gitLookupCache[normalizedPath] {
+            if lookup.isNonGit {
+                if let expiresAt = lookup.expiresAt, expiresAt > now {
+                    return nil
+                }
+                gitLookupCache.removeValue(forKey: normalizedPath)
+            } else if let repoKey = lookup.repoKey,
+                      var repoEntry = gitRepoCache[repoKey] {
+                refreshGitBranch(for: &repoEntry)
+                gitRepoCache[repoKey] = repoEntry
+                return (repoEntry.branch, repoEntry.repoRoot)
+            }
+        }
+
+        if let repoKey = cachedRepoKey(containing: normalizedPath),
+           var repoEntry = gitRepoCache[repoKey] {
+            gitLookupCache[normalizedPath] = GitLookupCacheEntry(repoKey: repoKey, isNonGit: false, expiresAt: nil)
+            refreshGitBranch(for: &repoEntry)
+            gitRepoCache[repoKey] = repoEntry
+            return (repoEntry.branch, repoEntry.repoRoot)
+        }
+
+        guard let repoIdentity = bootstrapGitRepo(for: normalizedPath) else {
+            gitLookupCache[normalizedPath] = GitLookupCacheEntry(
+                repoKey: nil,
+                isNonGit: true,
+                expiresAt: now.addingTimeInterval(nonGitCacheTTL)
+            )
+            return nil
+        }
+
+        var repoEntry = gitRepoCache[repoIdentity.gitDir] ?? GitRepoCacheEntry(
+            repoRoot: repoIdentity.repoRoot,
+            gitDir: repoIdentity.gitDir,
+            branch: nil,
+            headSignature: nil,
+            lastCheckedAt: now
+        )
+        repoEntry.lastCheckedAt = now
+        refreshGitBranch(for: &repoEntry)
+        gitRepoCache[repoIdentity.gitDir] = repoEntry
+        gitLookupCache[normalizedPath] = GitLookupCacheEntry(repoKey: repoIdentity.gitDir, isNonGit: false, expiresAt: nil)
+        gitLookupCache[repoIdentity.repoRoot] = GitLookupCacheEntry(repoKey: repoIdentity.gitDir, isNonGit: false, expiresAt: nil)
+
+        return (repoEntry.branch, repoEntry.repoRoot)
+    }
+
+    private func cachedRepoKey(containing path: String) -> String? {
+        gitRepoCache.values
+            .filter { entry in
+                path == entry.repoRoot || path.hasPrefix(entry.repoRoot + "/")
+            }
+            .max { lhs, rhs in
+                lhs.repoRoot.count < rhs.repoRoot.count
+            }?
+            .gitDir
+    }
+
+    private func bootstrapGitRepo(for path: String) -> (repoRoot: String, gitDir: String)? {
+        let output = shell(
+            "git -C \(shellQuoted(path)) rev-parse --show-toplevel --absolute-git-dir 2>/dev/null"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let lines = output
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard lines.count >= 2 else { return nil }
+        return (normalizePath(lines[0]), normalizePath(lines[1]))
+    }
+
+    private func refreshGitBranch(for entry: inout GitRepoCacheEntry) {
+        entry.lastCheckedAt = Date()
+
+        let headPath = entry.gitDir + "/HEAD"
+        guard let signature = try? String(contentsOfFile: headPath, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            entry.branch = nil
+            entry.headSignature = nil
+            return
+        }
+
+        entry.headSignature = signature
+        entry.branch = Self.branchName(fromHeadSignature: signature)
+    }
+
+    private func normalizePath(_ path: String) -> String {
+        guard path.hasPrefix("/") else { return path }
+        return (path as NSString).standardizingPath
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private static func branchName(fromHeadSignature signature: String) -> String? {
+        if signature.hasPrefix("ref: ") {
+            let ref = String(signature.dropFirst(5))
+            guard ref.hasPrefix("refs/heads/") else { return nil }
+            let branch = String(ref.dropFirst("refs/heads/".count))
+            return branch.isEmpty ? nil : branch
+        }
+
+        let hexCharacters = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        guard signature.count >= 7,
+              signature.rangeOfCharacter(from: hexCharacters.inverted) == nil else {
+            return nil
+        }
+        return String(signature.prefix(7))
     }
 
     // MARK: - Status Detection

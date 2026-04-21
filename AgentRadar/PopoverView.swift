@@ -163,7 +163,7 @@ struct AgentRowView: View {
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(.primary)
 
-                            Text(URL(fileURLWithPath: agent.workingDirectory).lastPathComponent)
+                            Text(agent.gitBranch ?? URL(fileURLWithPath: agent.workingDirectory).lastPathComponent)
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)
@@ -212,9 +212,9 @@ struct AgentRowView: View {
 
                     Spacer()
 
-                    // Last activity + open hint
+                    // Uptime + open hint
                     VStack(alignment: .trailing, spacing: 6) {
-                        Text(agent.lastActivityString)
+                        Text(agent.uptimeString)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
 
