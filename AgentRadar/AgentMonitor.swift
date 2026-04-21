@@ -212,6 +212,13 @@ class AgentMonitor: ObservableObject {
             updateStats(agent)
         }
 
+        agents.sort {
+            if $0.lastActivity != $1.lastActivity {
+                return $0.lastActivity > $1.lastActivity
+            }
+            return $0.pid < $1.pid
+        }
+
         // Clean up dead PIDs
         knownPIDs = knownPIDs.intersection(foundPIDs)
     }
