@@ -173,11 +173,12 @@ struct AgentRowView: View {
 
                     Spacer()
 
-                    // Uptime + open hint
+                    // Last activity + open hint
                     VStack(alignment: .trailing, spacing: 6) {
-                        Text(agent.uptimeString)
+                        Text(agent.lastActivityString)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
+                            .help("Last activity: \(agent.lastActivityString)\nSession age: \(agent.uptimeString)")
 
                         Image(systemName: "arrow.up.forward.app")
                             .font(.system(size: 12))

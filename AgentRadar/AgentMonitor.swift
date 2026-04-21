@@ -41,6 +41,7 @@ struct KnownAgent {
 private struct DetectedAgentSnapshot {
     let pid: Int32
     let kind: KnownAgent
+    let startTime: Date
     let cwd: String
     let cmd: String
     let tty: String
@@ -99,6 +100,18 @@ class DetectedAgent: ObservableObject, Identifiable {
         gitBranch ?? ""
     }
 
+    var lastActivityString: String {
+        let seconds = Int(Date().timeIntervalSince(lastActivity))
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 600 {
+            return "\(seconds / 60)m\(seconds % 60)s"
+        }
+        if seconds < 86400 {
+            return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
+        }
+        return lastActivity.formatted(date: .abbreviated, time: .shortened)
+    }
+
     var uptimeString: String {
         let seconds = Int(Date().timeIntervalSince(startTime))
         if seconds < 60 { return "\(seconds)s" }
@@ -106,11 +119,11 @@ class DetectedAgent: ObservableObject, Identifiable {
         return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
     }
 
-    init(pid: Int32, kind: KnownAgent, workingDirectory: String, commandLine: String, tty: String) {
+    init(pid: Int32, kind: KnownAgent, startTime: Date, workingDirectory: String, commandLine: String, tty: String) {
         self.id = "\(pid)"
         self.pid = pid
         self.kind = kind
-        self.startTime = Date()
+        self.startTime = startTime
         self.workingDirectory = workingDirectory
         self.commandLine = commandLine
         self.tty = tty
@@ -162,6 +175,7 @@ class AgentMonitor: ObservableObject {
     private func detectAgents() -> [DetectedAgentSnapshot] {
         var results: [DetectedAgentSnapshot] = []
         let myPID = ProcessInfo.processInfo.processIdentifier
+        let now = Date()
         var seenPIDs = Set<Int32>()
 
         for agent in KnownAgent.all {
@@ -185,27 +199,29 @@ class AgentMonitor: ObservableObject {
             for pid in pids {
                 if pid == myPID || seenPIDs.contains(pid) { continue }
 
-                // Get details: tty, stat, args
-                let details = shell("ps -p \(pid) -o tty=,stat=,args= 2>/dev/null")
+                // Get details: elapsed runtime, tty, stat, args
+                let details = shell("ps -p \(pid) -o etime=,tty=,stat=,args= 2>/dev/null")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !details.isEmpty else { continue }
 
-                let parts = details.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
-                guard parts.count >= 2 else { continue }
+                let parts = details.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+                guard parts.count >= 3 else { continue }
 
-                let tty = String(parts[0])
+                let elapsedTime = Self.elapsedTime(from: String(parts[0]))
+                let tty = String(parts[1])
                 // Skip processes not on a real TTY (GUI apps show "??")
                 guard tty != "??" else { continue }
                 // Skip duplicate agents on the same TTY (child node workers)
                 guard !seenTTYs.contains(tty) else { continue }
                 seenTTYs.insert(tty)
 
-                let cmd = parts.count >= 3 ? String(parts[2]) : agent.binaryName
+                let cmd = parts.count >= 4 ? String(parts[3]) : agent.binaryName
                 let cwd = getWorkingDirectory(for: pid)
                 results.append(
                     DetectedAgentSnapshot(
                         pid: pid,
                         kind: agent,
+                        startTime: now.addingTimeInterval(-elapsedTime),
                         cwd: cwd,
                         cmd: cmd,
                         tty: tty
@@ -232,6 +248,7 @@ class AgentMonitor: ObservableObject {
                 let agent = DetectedAgent(
                     pid: item.pid,
                     kind: item.kind,
+                    startTime: item.startTime,
                     workingDirectory: item.cwd,
                     commandLine: item.cmd,
                     tty: item.tty
@@ -269,12 +286,7 @@ class AgentMonitor: ObservableObject {
             updateStats(agent)
         }
 
-        agents.sort {
-            if $0.lastActivity != $1.lastActivity {
-                return $0.lastActivity > $1.lastActivity
-            }
-            return $0.pid < $1.pid
-        }
+        agents.sort(by: Self.menuSortsBefore)
 
         // Clean up dead PIDs
         knownPIDs = knownPIDs.intersection(foundPIDs)
@@ -384,6 +396,58 @@ class AgentMonitor: ObservableObject {
 
         entry.headSignature = signature
         entry.branch = Self.branchName(fromHeadSignature: signature)
+    }
+
+    private static func menuSortsBefore(_ lhs: DetectedAgent, _ rhs: DetectedAgent) -> Bool {
+        let lhsIsReady = lhs.status == .idle || lhs.status == .completed
+        let rhsIsReady = rhs.status == .idle || rhs.status == .completed
+
+        if lhsIsReady != rhsIsReady {
+            return !lhsIsReady
+        }
+
+        if lhs.lastActivity != rhs.lastActivity {
+            return lhs.lastActivity > rhs.lastActivity
+        }
+
+        if lhs.startTime != rhs.startTime {
+            return lhs.startTime > rhs.startTime
+        }
+
+        return lhs.pid < rhs.pid
+    }
+
+    private static func elapsedTime(from value: String) -> TimeInterval {
+        let parts = value.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: true)
+
+        let dayCount: Int
+        let clockPart: Substring
+
+        if parts.count == 2 {
+            dayCount = Int(parts[0]) ?? 0
+            clockPart = parts[1]
+        } else {
+            dayCount = 0
+            clockPart = parts[0]
+        }
+
+        let clockComponents = clockPart
+            .split(separator: ":")
+            .compactMap { Int($0) }
+
+        switch clockComponents.count {
+        case 2:
+            let minutes = clockComponents[0]
+            let seconds = clockComponents[1]
+            return TimeInterval((dayCount * 24 * 60 * 60) + (minutes * 60) + seconds)
+        case 3:
+            let hours = clockComponents[0]
+            let minutes = clockComponents[1]
+            let seconds = clockComponents[2]
+            return TimeInterval((dayCount * 24 * 60 * 60) + (hours * 60 * 60) + (minutes * 60) + seconds)
+        default:
+            return 0
+        }
     }
 
     private func normalizePath(_ path: String) -> String {
