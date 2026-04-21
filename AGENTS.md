@@ -26,7 +26,6 @@ xcodebuild -project AgentRadar.xcodeproj \
   -scheme AgentRadar \
   -configuration Release \
   -derivedDataPath build \
-  CODE_SIGNING_ALLOWED=NO \
   build
 ```
 
@@ -50,4 +49,4 @@ open /Applications/AgentRadar.app
 ## Notes
 
 - No paid Apple developer account is required for the local build above.
-- The project currently builds with `CODE_SIGNING_ALLOWED=NO`.
+- The project is configured for local ad-hoc signing (`CODE_SIGN_IDENTITY = -`), so the built app keeps a stable macOS identity without a paid Apple developer account.
