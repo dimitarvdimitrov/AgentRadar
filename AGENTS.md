@@ -6,6 +6,13 @@
 - Main target: `AgentRadar`
 - Project file: `AgentRadar.xcodeproj`
 
+## Git Workflow
+
+- The fork remote is `fork` and points at `dimitarvdimitrov/AgentRadar`.
+- The default branch is `main`.
+- When feature work should be merged into the fork, merge or fast-forward it into `fork/main`, push that branch, and leave the local checkout on `main`.
+- After merging feature work, continue working from the default branch unless the user asks for a separate branch.
+
 ## Build
 
 - Requires full Xcode, not just Command Line Tools.
