@@ -260,6 +260,19 @@ class AgentMonitor: ObservableObject {
             }
         }
 
+        // Codex also persists structured session logs; use them instead of CPU-only heuristics.
+        if agent.kind.binaryName == "codex" {
+            if let status = codexStatusFromSession(agent) {
+                agent.pendingToolCall = nil
+                agent.status = status.status
+                agent.currentActivity = status.activity
+                if status.status == .thinking || status.status == .running {
+                    agent.lastActivity = Date()
+                }
+                return
+            }
+        }
+
         // Fallback for other agents: check child processes
         let childPids = shell("pgrep -P \(agent.pid) 2>/dev/null")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -419,6 +432,103 @@ class AgentMonitor: ObservableObject {
             }
         }
         return bestPath
+    }
+
+    // MARK: - Codex Session-Based Status
+
+    private func codexStatusFromSession(_ agent: DetectedAgent) -> (status: AgentStatus, activity: String)? {
+        let sessionsRoot = NSHomeDirectory() + "/.codex/sessions"
+        guard let sessionPath = mostRecentCodexSession(in: sessionsRoot, cwd: agent.workingDirectory) else {
+            return nil
+        }
+
+        return codexStatus(fromSessionFile: sessionPath)
+    }
+
+    private func mostRecentCodexSession(in root: String, cwd: String) -> String? {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(atPath: root) else { return nil }
+
+        var candidates: [(path: String, modifiedAt: Date)] = []
+
+        for case let relativePath as String in enumerator {
+            guard relativePath.hasSuffix(".jsonl") else { continue }
+            let path = root + "/" + relativePath
+            guard let attrs = try? fm.attributesOfItem(atPath: path),
+                  let modifiedAt = attrs[.modificationDate] as? Date else { continue }
+            candidates.append((path, modifiedAt))
+        }
+
+        for candidate in candidates.sorted(by: { $0.modifiedAt > $1.modifiedAt }).prefix(50) {
+            if codexSessionWorkingDirectory(at: candidate.path) == cwd {
+                return candidate.path
+            }
+        }
+
+        return nil
+    }
+
+    private func codexSessionWorkingDirectory(at path: String) -> String? {
+        guard let firstLine = readFirstLine(of: path),
+              let data = firstLine.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String,
+              type == "session_meta",
+              let payload = json["payload"] as? [String: Any] else {
+            return nil
+        }
+
+        return payload["cwd"] as? String
+    }
+
+    private func codexStatus(fromSessionFile path: String) -> (status: AgentStatus, activity: String)? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { handle.closeFile() }
+
+        let fileSize = handle.seekToEndOfFile()
+        guard fileSize > 0 else { return nil }
+
+        let readSize: UInt64 = min(fileSize, 65536)
+        handle.seek(toFileOffset: fileSize - readSize)
+        let data = handle.readDataToEndOfFile()
+
+        guard let content = String(data: data, encoding: .utf8) else { return nil }
+
+        let lines = content
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .reversed()
+
+        for line in lines {
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let type = json["type"] as? String,
+                  type == "event_msg",
+                  let payload = json["payload"] as? [String: Any],
+                  let eventType = payload["type"] as? String else {
+                continue
+            }
+
+            switch eventType {
+            case "task_started":
+                return (.thinking, "Working...")
+            case "task_complete", "turn_aborted":
+                return (.idle, "Ready")
+            default:
+                continue
+            }
+        }
+
+        return nil
+    }
+
+    private func readFirstLine(of path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { handle.closeFile() }
+
+        let data = handle.readData(ofLength: 4096)
+        guard let content = String(data: data, encoding: .utf8) else { return nil }
+        return content.components(separatedBy: "\n").first
     }
 
     /// Read the last assistant or user entry from a JSONL file.
