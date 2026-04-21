@@ -91,6 +91,14 @@ class DetectedAgent: ObservableObject, Identifiable {
         return dir.isEmpty ? kind.displayName : "\(kind.displayName) — \(dir)"
     }
 
+    var directoryDisplayName: String {
+        URL(fileURLWithPath: workingDirectory).lastPathComponent
+    }
+
+    var branchDisplayLabel: String {
+        gitBranch ?? ""
+    }
+
     var uptimeString: String {
         let seconds = Int(Date().timeIntervalSince(startTime))
         if seconds < 60 { return "\(seconds)s" }

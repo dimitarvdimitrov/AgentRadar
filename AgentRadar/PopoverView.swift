@@ -158,56 +158,17 @@ struct AgentRowView: View {
 
                     // Info
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Text(agent.appName ?? agent.kind.displayName)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.primary)
+                        Text("\(statusLabel): \(agent.directoryDisplayName)")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
 
-                            Text(agent.gitBranch ?? URL(fileURLWithPath: agent.workingDirectory).lastPathComponent)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-
-                        // Activity line
-                        HStack(spacing: 5) {
-                            if agent.status == .thinking {
-                                AnimatedGradientText(text: agent.currentActivity.isEmpty ? "Thinking..." : agent.currentActivity)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            } else if agent.status == .needsAttention {
-                                if let tool = agent.pendingToolCall {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "exclamationmark.triangle.fill")
-                                                .font(.system(size: 10))
-                                                .foregroundColor(.orange)
-                                            Text(tool.toolName)
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundColor(.orange)
-                                        }
-                                        Text(tool.summary)
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                    }
-                                } else {
-                                    Text("Waiting for your input")
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundColor(.orange)
-                                }
-                            } else if agent.status == .idle {
-                                Text(agent.currentActivity.isEmpty ? "Idle" : agent.currentActivity)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text(agent.currentActivity.isEmpty ? statusLabel : agent.currentActivity)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
+                        Text(agent.branchDisplayLabel)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
 
                     Spacer()
