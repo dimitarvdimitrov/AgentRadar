@@ -451,11 +451,36 @@ class AgentMonitor: ObservableObject {
     }
 
     private static func menuSortsBefore(_ lhs: DetectedAgent, _ rhs: DetectedAgent) -> Bool {
-        let lhsIsReady = lhs.status == .idle || lhs.status == .completed
-        let rhsIsReady = rhs.status == .idle || rhs.status == .completed
+        let lhsIsActive = lhs.status != .idle && lhs.status != .completed
+        let rhsIsActive = rhs.status != .idle && rhs.status != .completed
 
-        if lhsIsReady != rhsIsReady {
-            return !lhsIsReady
+        if lhsIsActive != rhsIsActive {
+            return lhsIsActive
+        }
+
+        if lhsIsActive {
+            let lhsBranch = normalizedBranchSortKey(for: lhs)
+            let rhsBranch = normalizedBranchSortKey(for: rhs)
+
+            if lhsBranch.isEmpty != rhsBranch.isEmpty {
+                return !lhsBranch.isEmpty
+            }
+
+            let branchComparison = lhsBranch.localizedStandardCompare(rhsBranch)
+            if branchComparison != .orderedSame {
+                return branchComparison == .orderedAscending
+            }
+
+            let directoryComparison = lhs.directoryDisplayName.localizedStandardCompare(rhs.directoryDisplayName)
+            if directoryComparison != .orderedSame {
+                return directoryComparison == .orderedAscending
+            }
+
+            if lhs.startTime != rhs.startTime {
+                return lhs.startTime > rhs.startTime
+            }
+
+            return lhs.pid < rhs.pid
         }
 
         if lhs.lastActivity != rhs.lastActivity {
@@ -467,6 +492,12 @@ class AgentMonitor: ObservableObject {
         }
 
         return lhs.pid < rhs.pid
+    }
+
+    private static func normalizedBranchSortKey(for agent: DetectedAgent) -> String {
+        agent.gitBranch?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
     }
 
     private static func elapsedTime(from value: String) -> TimeInterval {
