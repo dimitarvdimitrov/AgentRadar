@@ -901,6 +901,15 @@ class AgentMonitor: ObservableObject {
 
             let validation = validateCodexSessionPath(path, for: agent)
             if validation.isValid {
+                if let refreshed = refreshedCodexSessionPathIfNeeded(
+                    currentPath: path,
+                    currentDelta: validation.startDelta,
+                    for: agent,
+                    in: root
+                ) {
+                    agent.codexSessionPath = refreshed.path
+                    return (refreshed.path, refreshed.debug)
+                }
                 return (path, validation.debug)
             }
 
@@ -947,10 +956,10 @@ class AgentMonitor: ObservableObject {
     private func bestCodexSessionPath(
         in root: String,
         agent: DetectedAgent
-    ) -> (path: String?, debug: String) {
+    ) -> (path: String?, startDelta: TimeInterval?, debug: String) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(atPath: root) else {
-            return (nil, "lookup=best_match root_unreadable root=\(root)")
+            return (nil, nil, "lookup=best_match root_unreadable root=\(root)")
         }
 
         var candidates: [(path: String, modifiedAt: Date)] = []
@@ -1008,12 +1017,14 @@ class AgentMonitor: ObservableObject {
         if let bestMatch {
             return (
                 bestMatch.path,
+                bestMatch.startDelta,
                 "lookup=best_match session=\(URL(fileURLWithPath: bestMatch.path).lastPathComponent) delta=\(Int(bestMatch.startDelta))s candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount)"
             )
         }
 
         if let closestCwdMatch {
             return (
+                nil,
                 nil,
                 "lookup=best_match_too_old closest_session=\(URL(fileURLWithPath: closestCwdMatch.path).lastPathComponent) delta=\(Int(closestCwdMatch.startDelta))s limit=\(Int(Self.codexSessionStartDeltaTolerance))s cwd=\(agent.workingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount)"
             )
@@ -1022,6 +1033,7 @@ class AgentMonitor: ObservableObject {
         let sampleSummary = metadataFailureSamples.isEmpty ? "-" : metadataFailureSamples.joined(separator: ",")
         return (
             nil,
+            nil,
             "lookup=best_match_miss cwd=\(agent.workingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount) metadata_failures=\(failureSummary) samples=\(sampleSummary)"
         )
     }
@@ -1029,17 +1041,18 @@ class AgentMonitor: ObservableObject {
     private func validateCodexSessionPath(
         _ path: String,
         for agent: DetectedAgent
-    ) -> (isValid: Bool, debug: String) {
+    ) -> (isValid: Bool, startDelta: TimeInterval, debug: String) {
         let sessionName = URL(fileURLWithPath: path).lastPathComponent
 
         guard let metadata = codexSessionMetadata(at: path) else {
             let failure = codexSessionMetadataFailureCache[path] ?? "metadata_unavailable"
-            return (false, "lookup=cached_invalid session=\(sessionName) reason=\(failure)")
+            return (false, .infinity, "lookup=cached_invalid session=\(sessionName) reason=\(failure)")
         }
 
         guard metadata.cwd == agent.workingDirectory else {
             return (
                 false,
+                .infinity,
                 "lookup=cached_invalid session=\(sessionName) reason=cwd_mismatch session_cwd=\(metadata.cwd) cwd=\(agent.workingDirectory)"
             )
         }
@@ -1048,11 +1061,38 @@ class AgentMonitor: ObservableObject {
         guard startDelta <= Self.codexSessionStartDeltaTolerance else {
             return (
                 false,
+                startDelta,
                 "lookup=cached_invalid session=\(sessionName) reason=start_delta delta=\(Int(startDelta))s limit=\(Int(Self.codexSessionStartDeltaTolerance))s"
             )
         }
 
-        return (true, "lookup=cached session=\(sessionName) delta=\(Int(startDelta))s")
+        return (true, startDelta, "lookup=cached session=\(sessionName) delta=\(Int(startDelta))s")
+    }
+
+    private func refreshedCodexSessionPathIfNeeded(
+        currentPath: String,
+        currentDelta: TimeInterval,
+        for agent: DetectedAgent,
+        in root: String
+    ) -> (path: String, debug: String)? {
+        // Session files can appear a moment after the Codex process starts.
+        // If we cached a loose in-cwd match first, re-run matching until we find
+        // a tighter start-time match for this process.
+        guard currentDelta > Self.codexSessionPinnedStartDeltaTolerance else { return nil }
+
+        let bestMatch = bestCodexSessionPath(in: root, agent: agent)
+        guard let bestPath = bestMatch.path,
+              let bestDelta = bestMatch.startDelta,
+              bestPath != currentPath,
+              bestDelta + 1 < currentDelta else {
+            return nil
+        }
+
+        let previousSession = URL(fileURLWithPath: currentPath).lastPathComponent
+        return (
+            bestPath,
+            "lookup=cached_replaced previous_session=\(previousSession) previous_delta=\(Int(currentDelta))s \(bestMatch.debug)"
+        )
     }
 
     private func codexSessionMetadata(at path: String) -> CodexSessionMetadata? {
@@ -1336,6 +1376,7 @@ class AgentMonitor: ObservableObject {
         return formatter
     }()
 
+    private static let codexSessionPinnedStartDeltaTolerance: TimeInterval = 10
     private static let codexSessionStartDeltaTolerance: TimeInterval = 300
 
     private func readFirstLine(of path: String) -> String? {
