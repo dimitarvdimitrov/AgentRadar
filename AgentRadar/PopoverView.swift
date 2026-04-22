@@ -87,114 +87,92 @@ struct AgentRowView: View {
 
     var statusColor: Color {
         switch agent.status {
-        case .thinking:  return .green
-        case .running:   return .blue
-        case .needsAttention: return .orange
-        case .idle:      return .gray
-        case .completed: return .secondary
+        case .thinking:  return Color(red: 0.13, green: 0.66, blue: 0.58)
+        case .running:   return Color(red: 0.22, green: 0.49, blue: 0.96)
+        case .needsAttention: return Color(red: 0.95, green: 0.55, blue: 0.18)
+        case .idle:      return Color.secondary
+        case .completed: return Color(red: 0.18, green: 0.66, blue: 0.34)
         }
     }
 
-    var statusLabel: String {
+    var statusIcon: String {
         switch agent.status {
-        case .thinking:  return "Thinking"
-        case .running:   return "Running"
-        case .needsAttention: return "Needs Input"
-        case .idle:      return "Idle"
-        case .completed: return "Done"
+        case .thinking:  return "sparkles"
+        case .running:   return "bolt.fill"
+        case .needsAttention: return "exclamationmark.triangle.fill"
+        case .idle:      return "pause.fill"
+        case .completed: return "checkmark"
         }
     }
 
-    var agentColor: Color {
-        Color(hex: agent.kind.color) ?? .orange
+    @ViewBuilder
+    var secondaryMetadata: some View {
+        if !agent.branchDisplayLabel.isEmpty {
+            Text(agent.branchDisplayLabel)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        } else if let appName = agent.appName, !appName.isEmpty {
+            Text(appName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        } else {
+            Text(agent.kind.displayName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
     }
 
     var body: some View {
         Button(action: { monitor.activateAgent(agent) }) {
             HStack(spacing: 14) {
-                    // Main Icon (App Icon) with small badge (Agent Icon)
-                    ZStack(alignment: .bottomTrailing) {
-                        if let appIcon = agent.appIcon {
-                            Image(nsImage: appIcon)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 40, height: 40)
-                        } else {
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Color.secondary.opacity(0.15))
-                                .frame(width: 40, height: 40)
-                                .overlay(
-                                    Image(systemName: "terminal.fill")
-                                        .font(.system(size: 18))
-                                        .foregroundColor(.secondary)
-                                )
-                        }
-                        
-                        // Small badge for agent type
-                        ZStack {
-                            Circle()
-                                .fill(Color(nsColor: .windowBackgroundColor))
-                                .frame(width: 18, height: 18)
-                                .shadow(color: Color.black.opacity(0.1), radius: 1, x: 0, y: 1)
-                            
-                            if let customIcon = agent.kind.customIcon {
-                                Image(customIcon)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(width: 14, height: 14)
-                                    .clipShape(RoundedRectangle(cornerRadius: 3))
-                            } else {
-                                Circle()
-                                    .fill(agentColor)
-                                    .frame(width: 14, height: 14)
-                                Image(systemName: agent.kind.icon)
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundColor(.white)
-                            }
-                        }
-                        .offset(x: 4, y: 4)
-                    }
-                    .padding(.trailing, 4)
+                AgentAvatarTileView(
+                    customIconName: agent.kind.customIcon,
+                    symbolName: agent.kind.icon,
+                    statusSymbolName: statusIcon,
+                    statusTint: statusColor
+                )
+                .padding(.trailing, 4)
 
-                    // Info
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(statusLabel): \(agent.directoryDisplayName)")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(agent.directoryDisplayName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
 
-                        Text(agent.branchDisplayLabel)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-
-                    Spacer()
-
-                    // Last activity + open hint
-                    VStack(alignment: .trailing, spacing: 6) {
-                        Text(agent.lastActivityString)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .help(
-                                """
-                                Last activity: \(agent.lastActivityString)
-                                Session age: \(agent.uptimeString)
-                                Status source: \(agent.statusDebugSource.isEmpty ? "unknown" : agent.statusDebugSource)
-                                \(agent.statusDebugDetails.isEmpty ? "No debug details yet" : agent.statusDebugDetails)
-                                """
-                            )
-
-                        Image(systemName: "arrow.up.forward.app")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary.opacity(0.7))
-                    }
+                    secondaryMetadata
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .contentShape(Rectangle())
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text(agent.lastActivityString)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .help(
+                            """
+                            Last activity: \(agent.lastActivityString)
+                            Session age: \(agent.uptimeString)
+                            Status source: \(agent.statusDebugSource.isEmpty ? "unknown" : agent.statusDebugSource)
+                            \(agent.statusDebugDetails.isEmpty ? "No debug details yet" : agent.statusDebugDetails)
+                            """
+                        )
+
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(
@@ -203,6 +181,84 @@ struct AgentRowView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
         )
+    }
+}
+
+struct AgentAvatarTileView: View {
+    let customIconName: String?
+    let symbolName: String
+    let statusSymbolName: String
+    let statusTint: Color
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.primary.opacity(0.08),
+                        Color.primary.opacity(0.03)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .overlay(alignment: .topLeading) {
+                Circle()
+                    .fill(Color.white.opacity(0.30))
+                    .frame(width: 20, height: 20)
+                    .blur(radius: 10)
+                    .offset(x: -2, y: -2)
+            }
+            .frame(width: 40, height: 40)
+            .overlay {
+                if let customIconName {
+                    Image(customIconName)
+                        .renderingMode(.template)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 20, height: 20)
+                        .foregroundStyle(Color.primary.opacity(0.78))
+                } else {
+                    Image(systemName: symbolName)
+                        .font(.system(size: 18, weight: .semibold))
+                        .symbolRenderingMode(.monochrome)
+                        .foregroundStyle(Color.primary.opacity(0.78))
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                StatusGlyphBadgeView(
+                    symbolName: statusSymbolName,
+                    tint: statusTint
+                )
+                .offset(x: 4, y: 4)
+            }
+    }
+}
+
+struct StatusGlyphBadgeView: View {
+    let symbolName: String
+    let tint: Color
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .frame(width: 18, height: 18)
+                .shadow(color: Color.black.opacity(0.08), radius: 1, x: 0, y: 1)
+
+            Circle()
+                .fill(tint.opacity(0.16))
+                .frame(width: 14, height: 14)
+
+            Image(systemName: symbolName)
+                .font(.system(size: 8, weight: .bold))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(tint)
+        }
     }
 }
 
