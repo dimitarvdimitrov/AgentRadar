@@ -45,6 +45,7 @@ private struct DetectedAgentSnapshot {
     let cwd: String
     let cmd: String
     let tty: String
+    let codexSessionIDHint: String?
     var gitBranch: String?
     var gitRepoRoot: String?
 }
@@ -63,6 +64,20 @@ private struct GitLookupCacheEntry {
     let expiresAt: Date?
 }
 
+private struct CodexSessionMetadata {
+    let id: String
+    let cwd: String
+    let startedAt: Date
+}
+
+private struct StatusDecision {
+    let status: AgentStatus
+    let activity: String
+    let source: String
+    let details: String
+    let refreshLastActivity: Bool
+}
+
 // MARK: - Detected Agent
 
 class DetectedAgent: ObservableObject, Identifiable {
@@ -73,6 +88,8 @@ class DetectedAgent: ObservableObject, Identifiable {
     var workingDirectory: String
     var commandLine: String
     var tty: String
+    var codexSessionIDHint: String?
+    var codexSessionPath: String?
     var ownerAppPID: pid_t?      // PID of the .app that owns this agent's terminal
 
     @Published var status: AgentStatus
@@ -86,6 +103,8 @@ class DetectedAgent: ObservableObject, Identifiable {
     @Published var pendingToolCall: PendingToolCall?
     @Published var gitBranch: String?
     @Published var gitRepoRoot: String?
+    @Published var statusDebugSource: String = ""
+    @Published var statusDebugDetails: String = ""
 
     var displayName: String {
         let dir = URL(fileURLWithPath: workingDirectory).lastPathComponent
@@ -119,7 +138,15 @@ class DetectedAgent: ObservableObject, Identifiable {
         return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
     }
 
-    init(pid: Int32, kind: KnownAgent, startTime: Date, workingDirectory: String, commandLine: String, tty: String) {
+    init(
+        pid: Int32,
+        kind: KnownAgent,
+        startTime: Date,
+        workingDirectory: String,
+        commandLine: String,
+        tty: String,
+        codexSessionIDHint: String?
+    ) {
         self.id = "\(pid)"
         self.pid = pid
         self.kind = kind
@@ -127,6 +154,7 @@ class DetectedAgent: ObservableObject, Identifiable {
         self.workingDirectory = workingDirectory
         self.commandLine = commandLine
         self.tty = tty
+        self.codexSessionIDHint = codexSessionIDHint
         self.status = .running
         self.lastActivity = Date()
     }
@@ -143,7 +171,18 @@ class AgentMonitor: ObservableObject {
     private var knownPIDs: Set<Int32> = []
     private var gitRepoCache: [String: GitRepoCacheEntry] = [:]
     private var gitLookupCache: [String: GitLookupCacheEntry] = [:]
+    private var codexSessionPathCache: [String: String] = [:]
+    private var codexSessionMetadataCache: [String: CodexSessionMetadata] = [:]
+    private var codexSessionMetadataFailureCache: [String: String] = [:]
+    private var statusDecisionLogCache: [Int32: String] = [:]
+    private var codexFallbackLogCache: [Int32: String] = [:]
     private let nonGitCacheTTL: TimeInterval = 10
+    private lazy var statusLogURL: URL = {
+        let logsDirectory = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Logs/AgentRadar", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
+        return logsDirectory.appendingPathComponent("status.log")
+    }()
 
     func start() {
         scan()
@@ -224,7 +263,10 @@ class AgentMonitor: ObservableObject {
                         startTime: now.addingTimeInterval(-elapsedTime),
                         cwd: cwd,
                         cmd: cmd,
-                        tty: tty
+                        tty: tty,
+                        codexSessionIDHint: agent.binaryName == "codex"
+                            ? Self.codexResumeSessionID(from: cmd)
+                            : nil
                     )
                 )
                 seenPIDs.insert(pid)
@@ -238,9 +280,14 @@ class AgentMonitor: ObservableObject {
     private func reconcile(_ found: [DetectedAgentSnapshot]) {
         let foundPIDs = Set(found.map { $0.pid })
         let foundByPID = Dictionary(uniqueKeysWithValues: found.map { ($0.pid, $0) })
+        let deadPIDs = Set(agents.map { $0.pid }).subtracting(foundPIDs)
 
         // Remove dead agents
         agents.removeAll { !foundPIDs.contains($0.pid) }
+        for pid in deadPIDs {
+            statusDecisionLogCache.removeValue(forKey: pid)
+            codexFallbackLogCache.removeValue(forKey: pid)
+        }
 
         // Add new agents
         for item in found {
@@ -251,7 +298,8 @@ class AgentMonitor: ObservableObject {
                     startTime: item.startTime,
                     workingDirectory: item.cwd,
                     commandLine: item.cmd,
-                    tty: item.tty
+                    tty: item.tty,
+                    codexSessionIDHint: item.codexSessionIDHint
                 )
                 // Layer 2: find the owning app for this agent
                 agent.ownerAppPID = findOwnerAppPID(pid: item.pid)
@@ -274,9 +322,13 @@ class AgentMonitor: ObservableObject {
 
         for agent in agents {
             guard let item = foundByPID[agent.pid] else { continue }
+            if agent.codexSessionIDHint != item.codexSessionIDHint || agent.workingDirectory != item.cwd {
+                agent.codexSessionPath = nil
+            }
             agent.workingDirectory = item.cwd
             agent.commandLine = item.cmd
             agent.tty = item.tty
+            agent.codexSessionIDHint = item.codexSessionIDHint
             agent.gitBranch = item.gitBranch
             agent.gitRepoRoot = item.gitRepoRoot
         }
@@ -450,6 +502,17 @@ class AgentMonitor: ObservableObject {
         }
     }
 
+    private static func codexResumeSessionID(from commandLine: String) -> String? {
+        let parts = commandLine.split(separator: " ")
+        guard let resumeIndex = parts.firstIndex(where: { $0 == "resume" }) else { return nil }
+
+        let sessionIndex = parts.index(after: resumeIndex)
+        guard sessionIndex < parts.endIndex else { return nil }
+
+        let sessionID = String(parts[sessionIndex]).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        return sessionID.isEmpty ? nil : sessionID
+    }
+
     private func normalizePath(_ path: String) -> String {
         guard path.hasPrefix("/") else { return path }
         return (path as NSString).standardizingPath
@@ -495,41 +558,55 @@ class AgentMonitor: ObservableObject {
         // Check if process is backgrounded or stopped first
         let isForeground = procState.contains("+")
         let isStopped = procState.contains("T")
+        let treeCPU = totalTreeCPU(for: agent.pid)
 
         if isStopped {
-            agent.status = .idle
-            agent.currentActivity = "Stopped"
-            return
-        }
-        if !isForeground && !procState.isEmpty {
-            agent.status = .idle
-            agent.currentActivity = "Backgrounded"
+            applyStatusDecision(
+                StatusDecision(
+                    status: .idle,
+                    activity: "Stopped",
+                    source: "proc_state",
+                    details: "reason=stopped",
+                    refreshLastActivity: false
+                ),
+                to: agent,
+                procState: procState,
+                treeCPU: treeCPU
+            )
             return
         }
 
         // For Claude Code: use JSONL transcript for reliable status
         if agent.kind.binaryName == "claude" {
-            if let status = claudeStatusFromTranscript(agent) {
-                agent.status = status.status
-                agent.currentActivity = status.activity
-                if status.status == .thinking {
-                    agent.lastActivity = Date()
-                }
+            if let decision = claudeStatusFromTranscript(agent, procState: procState, treeCPU: treeCPU) {
+                applyStatusDecision(decision, to: agent, procState: procState, treeCPU: treeCPU)
                 return
             }
         }
 
         // Codex also persists structured session logs; use them instead of CPU-only heuristics.
         if agent.kind.binaryName == "codex" {
-            if let status = codexStatusFromSession(agent) {
+            if let decision = codexStatusFromSession(agent) {
                 agent.pendingToolCall = nil
-                agent.status = status.status
-                agent.currentActivity = status.activity
-                if status.status == .thinking || status.status == .running {
-                    agent.lastActivity = Date()
-                }
+                applyStatusDecision(decision, to: agent, procState: procState, treeCPU: treeCPU)
                 return
             }
+        }
+
+        if !isForeground && !procState.isEmpty {
+            applyStatusDecision(
+                StatusDecision(
+                    status: .idle,
+                    activity: "Backgrounded",
+                    source: "proc_state",
+                    details: "reason=not_foreground\(codexLogContext(for: agent))",
+                    refreshLastActivity: false
+                ),
+                to: agent,
+                procState: procState,
+                treeCPU: treeCPU
+            )
+            return
         }
 
         // Fallback for other agents: check child processes
@@ -569,20 +646,45 @@ class AgentMonitor: ObservableObject {
         agent.childCommand = bestChild
 
         if hasActiveChildren {
-            agent.status = .thinking
-            agent.currentActivity = bestChild
-            agent.lastActivity = Date()
+            applyStatusDecision(
+                StatusDecision(
+                    status: .thinking,
+                    activity: bestChild,
+                    source: "child_process",
+                    details: bestChild.isEmpty ? "child=unknown" : "child=\(bestChild)",
+                    refreshLastActivity: true
+                ),
+                to: agent,
+                procState: procState,
+                treeCPU: treeCPU
+            )
         } else {
-            // Check CPU of the entire process tree — Node-based CLIs do all work
-            // inside their own process without spawning children
-            let treeCPU = totalTreeCPU(for: agent.pid)
             if treeCPU > 3.0 {
-                agent.status = .thinking
-                agent.currentActivity = "Thinking..."
-                agent.lastActivity = Date()
+                applyStatusDecision(
+                    StatusDecision(
+                        status: .thinking,
+                        activity: "Thinking...",
+                        source: "tree_cpu",
+                        details: "reason=cpu_threshold",
+                        refreshLastActivity: true
+                    ),
+                    to: agent,
+                    procState: procState,
+                    treeCPU: treeCPU
+                )
             } else {
-                agent.status = .idle
-                agent.currentActivity = "Ready"
+                applyStatusDecision(
+                    StatusDecision(
+                        status: .idle,
+                        activity: "Ready",
+                        source: "tree_cpu",
+                        details: "reason=cpu_below_threshold\(codexLogContext(for: agent))",
+                        refreshLastActivity: false
+                    ),
+                    to: agent,
+                    procState: procState,
+                    treeCPU: treeCPU
+                )
             }
         }
     }
@@ -592,7 +694,11 @@ class AgentMonitor: ObservableObject {
     /// Read the Claude Code JSONL transcript to determine actual agent status.
     /// The transcript is the source of truth — if it says the agent finished its turn,
     /// the agent IS waiting for user input, regardless of how long ago that was.
-    private func claudeStatusFromTranscript(_ agent: DetectedAgent) -> (status: AgentStatus, activity: String)? {
+    private func claudeStatusFromTranscript(
+        _ agent: DetectedAgent,
+        procState: String,
+        treeCPU: Double
+    ) -> StatusDecision? {
         // Convert working directory to Claude's project dir format:
         // /Users/foo/bar → -Users-foo-bar
         let projectDirName = agent.workingDirectory.replacingOccurrences(of: "/", with: "-")
@@ -606,10 +712,8 @@ class AgentMonitor: ObservableObject {
               let mtime = attrs[.modificationDate] as? Date else { return nil }
 
         let staleness = Date().timeIntervalSince(mtime)
-
-        // Check if the agent process tree is actively using CPU
-        let treeCPU = totalTreeCPU(for: agent.pid)
         let isActive = treeCPU > 3.0
+        let transcriptName = URL(fileURLWithPath: jsonlPath).lastPathComponent
 
         // Read recent lines and find the last assistant/user entry
         // (skip system/progress metadata lines that Claude appends after turns)
@@ -625,13 +729,25 @@ class AgentMonitor: ObservableObject {
         case "assistant":
             if stopReason == "end_turn" {
                 agent.pendingToolCall = nil
-                return (.completed, "Task completed")
+                return StatusDecision(
+                    status: .completed,
+                    activity: "Task completed",
+                    source: "claude_transcript",
+                    details: "entry=assistant stop_reason=end_turn transcript=\(transcriptName) staleness=\(Int(staleness))s",
+                    refreshLastActivity: false
+                )
             } else if stopReason == "tool_use" {
                 // Agent wants to use a tool
                 if staleness < 3 || isActive {
                     // File was just updated or agent is actively working
                     agent.pendingToolCall = nil
-                    return (.thinking, "Running tool...")
+                    return StatusDecision(
+                        status: .thinking,
+                        activity: "Running tool...",
+                        source: "claude_transcript",
+                        details: "entry=assistant stop_reason=tool_use transcript=\(transcriptName) staleness=\(Int(staleness))s",
+                        refreshLastActivity: true
+                    )
                 } else {
                     // Tool call sitting there — waiting for user approval
                     if let contentArray = message?["content"] as? [[String: Any]] {
@@ -645,16 +761,34 @@ class AgentMonitor: ObservableObject {
                             }
                         }
                     }
-                    return (.needsAttention, "Waiting for tool approval")
+                    return StatusDecision(
+                        status: .needsAttention,
+                        activity: "Waiting for tool approval",
+                        source: "claude_transcript",
+                        details: "entry=assistant stop_reason=tool_use transcript=\(transcriptName) staleness=\(Int(staleness))s",
+                        refreshLastActivity: false
+                    )
                 }
             } else {
                 // stop_reason is null — still streaming or waiting for API
                 agent.pendingToolCall = nil
                 if staleness < 30 || isActive {
-                    return (.thinking, "Thinking...")
+                    return StatusDecision(
+                        status: .thinking,
+                        activity: "Thinking...",
+                        source: "claude_transcript",
+                        details: "entry=assistant stop_reason=nil transcript=\(transcriptName) staleness=\(Int(staleness))s",
+                        refreshLastActivity: true
+                    )
                 } else {
                     // Stale and no CPU — likely done or stalled
-                    return (.completed, "Task completed")
+                    return StatusDecision(
+                        status: .completed,
+                        activity: "Task completed",
+                        source: "claude_transcript",
+                        details: "entry=assistant stop_reason=nil transcript=\(transcriptName) staleness=\(Int(staleness))s",
+                        refreshLastActivity: false
+                    )
                 }
             }
 
@@ -662,9 +796,21 @@ class AgentMonitor: ObservableObject {
             // User sent a message or tool result — agent is working
             agent.pendingToolCall = nil
             if staleness < 30 || isActive {
-                return (.thinking, "Thinking...")
+                return StatusDecision(
+                    status: .thinking,
+                    activity: "Thinking...",
+                    source: "claude_transcript",
+                    details: "entry=user transcript=\(transcriptName) staleness=\(Int(staleness))s",
+                    refreshLastActivity: true
+                )
             } else {
-                return (.running, "Active")
+                return StatusDecision(
+                    status: .running,
+                    activity: "Active",
+                    source: "claude_transcript",
+                    details: "entry=user transcript=\(transcriptName) staleness=\(Int(staleness))s",
+                    refreshLastActivity: true
+                )
             }
 
         default:
@@ -695,18 +841,88 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Codex Session-Based Status
 
-    private func codexStatusFromSession(_ agent: DetectedAgent) -> (status: AgentStatus, activity: String)? {
+    private func codexStatusFromSession(_ agent: DetectedAgent) -> StatusDecision? {
         let sessionsRoot = NSHomeDirectory() + "/.codex/sessions"
-        guard let sessionPath = mostRecentCodexSession(in: sessionsRoot, cwd: agent.workingDirectory) else {
+        let sessionLookup = codexSessionPath(for: agent, in: sessionsRoot)
+        guard let sessionPath = sessionLookup.path else {
+            logCodexFallbackIfNeeded(for: agent, reason: sessionLookup.debug)
             return nil
         }
 
-        return codexStatus(fromSessionFile: sessionPath)
+        let statusProbe = codexStatus(fromSessionFile: sessionPath)
+        guard let decision = statusProbe.decision else {
+            logCodexFallbackIfNeeded(for: agent, reason: statusProbe.debug)
+            return nil
+        }
+
+        codexFallbackLogCache.removeValue(forKey: agent.pid)
+        return decision
     }
 
-    private func mostRecentCodexSession(in root: String, cwd: String) -> String? {
+    private func codexSessionPath(
+        for agent: DetectedAgent,
+        in root: String
+    ) -> (path: String?, debug: String) {
         let fm = FileManager.default
+
+        if let path = agent.codexSessionPath, fm.fileExists(atPath: path) {
+            if agent.codexSessionIDHint != nil {
+                return (path, "lookup=cached session=\(URL(fileURLWithPath: path).lastPathComponent)")
+            }
+
+            let validation = validateCodexSessionPath(path, for: agent)
+            if validation.isValid {
+                return (path, validation.debug)
+            }
+
+            agent.codexSessionPath = nil
+        }
+
+        if let sessionID = agent.codexSessionIDHint,
+           let path = codexSessionPath(forSessionID: sessionID, in: root) {
+            agent.codexSessionPath = path
+            return (path, "lookup=resume_hint hint=\(sessionID) session=\(URL(fileURLWithPath: path).lastPathComponent)")
+        }
+
+        let bestMatch = bestCodexSessionPath(in: root, agent: agent)
+        guard let path = bestMatch.path else {
+            if let sessionID = agent.codexSessionIDHint {
+                return (nil, "lookup=resume_hint_miss hint=\(sessionID) \(bestMatch.debug)")
+            }
+            return (nil, bestMatch.debug)
+        }
+
+        agent.codexSessionPath = path
+        return (path, bestMatch.debug)
+    }
+
+    private func codexSessionPath(forSessionID sessionID: String, in root: String) -> String? {
+        let fm = FileManager.default
+
+        if let cachedPath = codexSessionPathCache[sessionID], fm.fileExists(atPath: cachedPath) {
+            return cachedPath
+        }
+
         guard let enumerator = fm.enumerator(atPath: root) else { return nil }
+
+        for case let relativePath as String in enumerator {
+            guard relativePath.hasSuffix("\(sessionID).jsonl") else { continue }
+            let path = root + "/" + relativePath
+            codexSessionPathCache[sessionID] = path
+            return path
+        }
+
+        return nil
+    }
+
+    private func bestCodexSessionPath(
+        in root: String,
+        agent: DetectedAgent
+    ) -> (path: String?, debug: String) {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(atPath: root) else {
+            return (nil, "lookup=best_match root_unreadable root=\(root)")
+        }
 
         var candidates: [(path: String, modifiedAt: Date)] = []
 
@@ -718,45 +934,185 @@ class AgentMonitor: ObservableObject {
             candidates.append((path, modifiedAt))
         }
 
-        for candidate in candidates.sorted(by: { $0.modifiedAt > $1.modifiedAt }).prefix(50) {
-            if codexSessionWorkingDirectory(at: candidate.path) == cwd {
-                return candidate.path
+        var bestMatch: (path: String, modifiedAt: Date, startDelta: TimeInterval)?
+        var closestCwdMatch: (path: String, startDelta: TimeInterval)?
+        var parsedMetadataCount = 0
+        var cwdMatchCount = 0
+        var metadataFailureCounts: [String: Int] = [:]
+        var metadataFailureSamples: [String] = []
+
+        for candidate in candidates.sorted(by: { $0.modifiedAt > $1.modifiedAt }) {
+            guard let metadata = codexSessionMetadata(at: candidate.path) else {
+                let failure = codexSessionMetadataFailureCache[candidate.path] ?? "metadata_unavailable"
+                metadataFailureCounts[failure, default: 0] += 1
+                if metadataFailureSamples.count < 3 {
+                    metadataFailureSamples.append("\(URL(fileURLWithPath: candidate.path).lastPathComponent):\(failure)")
+                }
+                continue
+            }
+
+            parsedMetadataCount += 1
+
+            guard metadata.cwd == agent.workingDirectory else {
+                continue
+            }
+
+            cwdMatchCount += 1
+            let startDelta = abs(metadata.startedAt.timeIntervalSince(agent.startTime))
+
+            if closestCwdMatch == nil || startDelta < closestCwdMatch!.startDelta {
+                closestCwdMatch = (candidate.path, startDelta)
+            }
+
+            guard startDelta <= Self.codexSessionStartDeltaTolerance else {
+                continue
+            }
+
+            if bestMatch == nil ||
+                startDelta < bestMatch!.startDelta ||
+                (startDelta == bestMatch!.startDelta && candidate.modifiedAt > bestMatch!.modifiedAt) {
+                bestMatch = (candidate.path, candidate.modifiedAt, startDelta)
             }
         }
 
-        return nil
+        let failureSummary = Self.formatCountSummary(metadataFailureCounts)
+        if let bestMatch {
+            return (
+                bestMatch.path,
+                "lookup=best_match session=\(URL(fileURLWithPath: bestMatch.path).lastPathComponent) delta=\(Int(bestMatch.startDelta))s candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount)"
+            )
+        }
+
+        if let closestCwdMatch {
+            return (
+                nil,
+                "lookup=best_match_too_old closest_session=\(URL(fileURLWithPath: closestCwdMatch.path).lastPathComponent) delta=\(Int(closestCwdMatch.startDelta))s limit=\(Int(Self.codexSessionStartDeltaTolerance))s cwd=\(agent.workingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount)"
+            )
+        }
+
+        let sampleSummary = metadataFailureSamples.isEmpty ? "-" : metadataFailureSamples.joined(separator: ",")
+        return (
+            nil,
+            "lookup=best_match_miss cwd=\(agent.workingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount) metadata_failures=\(failureSummary) samples=\(sampleSummary)"
+        )
     }
 
-    private func codexSessionWorkingDirectory(at path: String) -> String? {
-        guard let firstLine = readFirstLine(of: path),
-              let data = firstLine.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = json["type"] as? String,
-              type == "session_meta",
-              let payload = json["payload"] as? [String: Any] else {
+    private func validateCodexSessionPath(
+        _ path: String,
+        for agent: DetectedAgent
+    ) -> (isValid: Bool, debug: String) {
+        let sessionName = URL(fileURLWithPath: path).lastPathComponent
+
+        guard let metadata = codexSessionMetadata(at: path) else {
+            let failure = codexSessionMetadataFailureCache[path] ?? "metadata_unavailable"
+            return (false, "lookup=cached_invalid session=\(sessionName) reason=\(failure)")
+        }
+
+        guard metadata.cwd == agent.workingDirectory else {
+            return (
+                false,
+                "lookup=cached_invalid session=\(sessionName) reason=cwd_mismatch session_cwd=\(metadata.cwd) cwd=\(agent.workingDirectory)"
+            )
+        }
+
+        let startDelta = abs(metadata.startedAt.timeIntervalSince(agent.startTime))
+        guard startDelta <= Self.codexSessionStartDeltaTolerance else {
+            return (
+                false,
+                "lookup=cached_invalid session=\(sessionName) reason=start_delta delta=\(Int(startDelta))s limit=\(Int(Self.codexSessionStartDeltaTolerance))s"
+            )
+        }
+
+        return (true, "lookup=cached session=\(sessionName) delta=\(Int(startDelta))s")
+    }
+
+    private func codexSessionMetadata(at path: String) -> CodexSessionMetadata? {
+        if let cached = codexSessionMetadataCache[path] {
+            return cached
+        }
+
+        guard let firstLine = readFirstLine(of: path) else {
+            codexSessionMetadataFailureCache[path] = "first_line_unreadable"
             return nil
         }
 
-        return payload["cwd"] as? String
+        guard let data = firstLine.data(using: .utf8) else {
+            codexSessionMetadataFailureCache[path] = "first_line_invalid_utf8"
+            return nil
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            codexSessionMetadataFailureCache[path] = "first_line_invalid_json"
+            return nil
+        }
+
+        guard let type = json["type"] as? String, type == "session_meta" else {
+            codexSessionMetadataFailureCache[path] = "missing_session_meta"
+            return nil
+        }
+
+        guard let payload = json["payload"] as? [String: Any] else {
+            codexSessionMetadataFailureCache[path] = "missing_payload"
+            return nil
+        }
+
+        guard let id = payload["id"] as? String, !id.isEmpty else {
+            codexSessionMetadataFailureCache[path] = "missing_id"
+            return nil
+        }
+
+        guard let cwd = payload["cwd"] as? String, !cwd.isEmpty else {
+            codexSessionMetadataFailureCache[path] = "missing_cwd"
+            return nil
+        }
+
+        guard let timestamp = payload["timestamp"] as? String, !timestamp.isEmpty else {
+            codexSessionMetadataFailureCache[path] = "missing_timestamp"
+            return nil
+        }
+
+        guard let startedAt = Self.codexTimestampFormatter.date(from: timestamp)
+            ?? Self.codexTimestampFormatterWithoutFractionalSeconds.date(from: timestamp) else {
+            codexSessionMetadataFailureCache[path] = "invalid_timestamp"
+            return nil
+        }
+
+        let metadata = CodexSessionMetadata(id: id, cwd: cwd, startedAt: startedAt)
+        codexSessionMetadataCache[path] = metadata
+        codexSessionPathCache[id] = path
+        codexSessionMetadataFailureCache.removeValue(forKey: path)
+        return metadata
     }
 
-    private func codexStatus(fromSessionFile path: String) -> (status: AgentStatus, activity: String)? {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+    private func codexStatus(
+        fromSessionFile path: String
+    ) -> (decision: StatusDecision?, debug: String) {
+        guard let handle = FileHandle(forReadingAtPath: path) else {
+            return (nil, "status=file_unreadable session=\(URL(fileURLWithPath: path).lastPathComponent)")
+        }
         defer { handle.closeFile() }
 
         let fileSize = handle.seekToEndOfFile()
-        guard fileSize > 0 else { return nil }
+        guard fileSize > 0 else {
+            return (nil, "status=empty_file session=\(URL(fileURLWithPath: path).lastPathComponent)")
+        }
 
-        let readSize: UInt64 = min(fileSize, 65536)
+        // Codex can append very large response payloads after the last status event.
+        // Read a larger tail window so `task_started` / `task_complete` remain visible.
+        let readSize: UInt64 = min(fileSize, 1_048_576)
         handle.seek(toFileOffset: fileSize - readSize)
         let data = handle.readDataToEndOfFile()
 
-        guard let content = String(data: data, encoding: .utf8) else { return nil }
+        guard let content = String(data: data, encoding: .utf8) else {
+            return (nil, "status=tail_invalid_utf8 session=\(URL(fileURLWithPath: path).lastPathComponent) read_size=\(readSize)")
+        }
 
         let lines = content
             .components(separatedBy: "\n")
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             .reversed()
+        var recentEventTypes: [String] = []
+        var eventMsgCount = 0
 
         for line in lines {
             guard let lineData = line.data(using: .utf8),
@@ -768,24 +1124,196 @@ class AgentMonitor: ObservableObject {
                 continue
             }
 
+            eventMsgCount += 1
+            if recentEventTypes.count < 8 {
+                recentEventTypes.append(eventType)
+            }
+
             switch eventType {
             case "task_started":
-                return (.thinking, "Working...")
+                return (
+                    StatusDecision(
+                        status: .thinking,
+                        activity: "Working...",
+                        source: "codex_session",
+                        details: "event=task_started session=\(URL(fileURLWithPath: path).lastPathComponent) timestamp=\(json["timestamp"] as? String ?? "-")",
+                        refreshLastActivity: true
+                    ),
+                    "status=task_started session=\(URL(fileURLWithPath: path).lastPathComponent)"
+                )
             case "task_complete", "turn_aborted":
-                return (.idle, "Ready")
+                return (
+                    StatusDecision(
+                        status: .idle,
+                        activity: "Ready",
+                        source: "codex_session",
+                        details: "event=\(eventType) session=\(URL(fileURLWithPath: path).lastPathComponent) timestamp=\(json["timestamp"] as? String ?? "-")",
+                        refreshLastActivity: false
+                    ),
+                    "status=\(eventType) session=\(URL(fileURLWithPath: path).lastPathComponent)"
+                )
             default:
                 continue
             }
         }
 
-        return nil
+        let recentEvents = recentEventTypes.isEmpty ? "-" : recentEventTypes.joined(separator: ",")
+        return (
+            nil,
+            "status=no_task_event session=\(URL(fileURLWithPath: path).lastPathComponent) event_msgs=\(eventMsgCount) recent_events=\(recentEvents) read_size=\(readSize)"
+        )
     }
+
+    private func applyStatusDecision(
+        _ decision: StatusDecision,
+        to agent: DetectedAgent,
+        procState: String,
+        treeCPU: Double
+    ) {
+        agent.status = decision.status
+        agent.currentActivity = decision.activity
+        agent.statusDebugSource = decision.source
+        agent.statusDebugDetails = decision.details
+        if decision.refreshLastActivity {
+            agent.lastActivity = Date()
+        }
+        if decision.source == "codex_session" {
+            codexFallbackLogCache.removeValue(forKey: agent.pid)
+        }
+        logStatusDecisionIfNeeded(decision, for: agent, procState: procState, treeCPU: treeCPU)
+    }
+
+    private func logStatusDecisionIfNeeded(
+        _ decision: StatusDecision,
+        for agent: DetectedAgent,
+        procState: String,
+        treeCPU: Double
+    ) {
+        let fingerprint = [
+            "\(decision.status)",
+            decision.activity,
+            decision.source,
+            decision.details,
+            procState,
+            String(format: "%.1f", treeCPU)
+        ].joined(separator: "|")
+
+        guard statusDecisionLogCache[agent.pid] != fingerprint else { return }
+        statusDecisionLogCache[agent.pid] = fingerprint
+
+        let logLine = [
+            Self.iso8601Timestamp.string(from: Date()),
+            "pid=\(agent.pid)",
+            "kind=\(agent.kind.binaryName)",
+            "dir=\(shellSafeLogValue(agent.directoryDisplayName))",
+            "status=\(String(describing: decision.status))",
+            "activity=\(shellSafeLogValue(decision.activity))",
+            "source=\(decision.source)",
+            "proc_state=\(procState.isEmpty ? "-" : procState)",
+            String(format: "tree_cpu=%.1f", treeCPU),
+            "details=\(shellSafeLogValue(decision.details))"
+        ].joined(separator: " ")
+
+        appendStatusLog(logLine + "\n")
+    }
+
+    private func appendStatusLog(_ line: String) {
+        let data = Data(line.utf8)
+        let fileManager = FileManager.default
+
+        if !fileManager.fileExists(atPath: statusLogURL.path) {
+            fileManager.createFile(atPath: statusLogURL.path, contents: data)
+            return
+        }
+
+        guard let handle = try? FileHandle(forWritingTo: statusLogURL) else { return }
+        defer { try? handle.close() }
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            return
+        }
+    }
+
+    private func logCodexFallbackIfNeeded(for agent: DetectedAgent, reason: String) {
+        let fingerprint = [
+            agent.workingDirectory,
+            agent.codexSessionIDHint ?? "-",
+            reason
+        ].joined(separator: "|")
+
+        guard codexFallbackLogCache[agent.pid] != fingerprint else { return }
+        codexFallbackLogCache[agent.pid] = fingerprint
+
+        let logLine = [
+            Self.iso8601Timestamp.string(from: Date()),
+            "pid=\(agent.pid)",
+            "kind=\(agent.kind.binaryName)",
+            "dir=\(shellSafeLogValue(agent.directoryDisplayName))",
+            "source=codex_fallback",
+            "reason=\(shellSafeLogValue(reason))",
+            "session_hint=\(agent.codexSessionIDHint ?? "-")",
+            "cached_session=\(shellSafeLogValue(agent.codexSessionPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "-"))"
+        ].joined(separator: " ")
+
+        appendStatusLog(logLine + "\n")
+    }
+
+    private func codexLogContext(for agent: DetectedAgent) -> String {
+        guard agent.kind.binaryName == "codex" else { return "" }
+        let sessionName = agent.codexSessionPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "-"
+        let sessionHint = agent.codexSessionIDHint ?? "-"
+        return " session_hint=\(sessionHint) session=\(sessionName)"
+    }
+
+    private static func formatCountSummary(_ counts: [String: Int]) -> String {
+        guard !counts.isEmpty else { return "-" }
+        return counts
+            .sorted { lhs, rhs in
+                if lhs.value == rhs.value {
+                    return lhs.key < rhs.key
+                }
+                return lhs.value > rhs.value
+            }
+            .prefix(4)
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ",")
+    }
+
+    private func shellSafeLogValue(_ value: String) -> String {
+        let sanitized = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        return "\"\(sanitized)\""
+    }
+
+    private static let iso8601Timestamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let codexTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let codexTimestampFormatterWithoutFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    private static let codexSessionStartDeltaTolerance: TimeInterval = 300
 
     private func readFirstLine(of path: String) -> String? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { handle.closeFile() }
 
-        let data = handle.readData(ofLength: 4096)
+        let data = handle.readData(ofLength: 65536)
         guard let content = String(data: data, encoding: .utf8) else { return nil }
         return content.components(separatedBy: "\n").first
     }

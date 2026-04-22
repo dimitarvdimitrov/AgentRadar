@@ -178,7 +178,14 @@ struct AgentRowView: View {
                         Text(agent.lastActivityString)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
-                            .help("Last activity: \(agent.lastActivityString)\nSession age: \(agent.uptimeString)")
+                            .help(
+                                """
+                                Last activity: \(agent.lastActivityString)
+                                Session age: \(agent.uptimeString)
+                                Status source: \(agent.statusDebugSource.isEmpty ? "unknown" : agent.statusDebugSource)
+                                \(agent.statusDebugDetails.isEmpty ? "No debug details yet" : agent.statusDebugDetails)
+                                """
+                            )
 
                         Image(systemName: "arrow.up.forward.app")
                             .font(.system(size: 12))
