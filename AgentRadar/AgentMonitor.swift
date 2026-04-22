@@ -122,9 +122,7 @@ class DetectedAgent: ObservableObject, Identifiable {
     var lastActivityString: String {
         let seconds = Int(Date().timeIntervalSince(lastActivity))
         if seconds < 60 { return "\(seconds)s" }
-        if seconds < 600 {
-            return "\(seconds / 60)m\(seconds % 60)s"
-        }
+        if seconds < 3600 { return "\(seconds / 60)m" }
         if seconds < 86400 {
             return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
         }
