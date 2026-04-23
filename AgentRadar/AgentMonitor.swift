@@ -185,6 +185,8 @@ class AgentMonitor: ObservableObject {
 
     var onUpdate: (([DetectedAgent]) -> Void)?
     private var timer: Timer?
+    private var isScanInFlight = false
+    private var scanRequestedWhileRunning = false
     private var knownPIDs: Set<Int32> = []
     private var gitRepoCache: [String: GitRepoCacheEntry] = [:]
     private var gitLookupCache: [String: GitLookupCacheEntry] = [:]
@@ -214,6 +216,14 @@ class AgentMonitor: ObservableObject {
     }
 
     private func scan() {
+        if isScanInFlight {
+            scanRequestedWhileRunning = true
+            return
+        }
+
+        isScanInFlight = true
+        scanRequestedWhileRunning = false
+
         let cachedCodexSessionPathsByPID = Dictionary(
             uniqueKeysWithValues: agents.map { ($0.pid, $0.codexSessionPath) }
         )
@@ -227,6 +237,14 @@ class AgentMonitor: ObservableObject {
             )
 
             DispatchQueue.main.async {
+                defer {
+                    self.isScanInFlight = false
+
+                    if self.scanRequestedWhileRunning {
+                        self.scan()
+                    }
+                }
+
                 self.reconcile(found)
                 self.lastScan = Date()
                 self.onUpdate?(self.agents)
@@ -329,18 +347,6 @@ class AgentMonitor: ObservableObject {
                     tty: item.tty,
                     codexSessionIDHint: item.codexSessionIDHint
                 )
-                // Layer 2: find the owning app for this agent
-                agent.ownerAppPID = findOwnerAppPID(pid: item.pid)
-                if let ownerPID = agent.ownerAppPID, let app = NSRunningApplication(processIdentifier: ownerPID) {
-                    agent.appIcon = app.icon
-                    agent.appName = app.localizedName
-                } else if let appName = findOwnerAppName(pid: item.pid) {
-                    agent.appName = appName
-                    let workspace = NSWorkspace.shared
-                    if let path = workspace.fullPath(forApplication: appName) {
-                        agent.appIcon = workspace.icon(forFile: path)
-                    }
-                }
                 agent.gitBranch = item.gitBranch
                 agent.gitRepoRoot = item.gitRepoRoot
                 agent.codexSessionPath = item.codexSessionPath
@@ -366,7 +372,6 @@ class AgentMonitor: ObservableObject {
             agent.gitRepoRoot = item.gitRepoRoot
         }
 
-        // Update stats for all agents
         for agent in agents {
             updateStats(agent)
         }
@@ -488,9 +493,34 @@ class AgentMonitor: ObservableObject {
     }
 
     private func bootstrapGitRepo(for path: String) -> (repoRoot: String, gitDir: String)? {
-        let output = shell(
-            "git -C \(shellQuoted(path)) rev-parse --show-toplevel --absolute-git-dir 2>/dev/null"
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let task = Process()
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        task.arguments = ["-C", path, "rev-parse", "--show-toplevel", "--absolute-git-dir"]
+
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+
+        let deadline = Date().addingTimeInterval(1.0)
+        while task.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        if task.isRunning {
+            task.terminate()
+            return nil
+        }
+
+        let output = String(
+            data: pipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         let lines = output
             .components(separatedBy: "\n")
@@ -957,13 +987,6 @@ class AgentMonitor: ObservableObject {
         agent.codexSessionPath = sessionPath
         if let metadata = sessionLookup.metadata {
             agent.workingDirectory = metadata.cwd
-            if let gitContext = gitContext(for: metadata.cwd) {
-                agent.gitBranch = gitContext.branch
-                agent.gitRepoRoot = gitContext.repoRoot
-            } else {
-                agent.gitBranch = nil
-                agent.gitRepoRoot = nil
-            }
         }
 
         let statusProbe = codexStatus(fromSessionFile: sessionPath)
