@@ -42,10 +42,12 @@ private struct DetectedAgentSnapshot {
     let pid: Int32
     let kind: KnownAgent
     let startTime: Date
-    let cwd: String
+    let processWorkingDirectory: String
+    var workingDirectory: String
     let cmd: String
     let tty: String
     let codexSessionIDHint: String?
+    var codexSessionPath: String?
     var gitBranch: String?
     var gitRepoRoot: String?
 }
@@ -70,6 +72,20 @@ private struct CodexSessionMetadata {
     let startedAt: Date
 }
 
+private struct CodexSessionLookupContext {
+    let startTime: Date
+    let processWorkingDirectory: String
+    let sessionIDHint: String?
+    let cachedSessionPath: String?
+}
+
+private struct CodexSessionLookupResult {
+    let path: String?
+    let metadata: CodexSessionMetadata?
+    let startDelta: TimeInterval?
+    let debug: String
+}
+
 private struct StatusDecision {
     let status: AgentStatus
     let activity: String
@@ -85,7 +101,8 @@ class DetectedAgent: ObservableObject, Identifiable {
     let pid: Int32
     let kind: KnownAgent
     let startTime: Date
-    var workingDirectory: String
+    var processWorkingDirectory: String
+    @Published var workingDirectory: String
     var commandLine: String
     var tty: String
     var codexSessionIDHint: String?
@@ -140,6 +157,7 @@ class DetectedAgent: ObservableObject, Identifiable {
         pid: Int32,
         kind: KnownAgent,
         startTime: Date,
+        processWorkingDirectory: String,
         workingDirectory: String,
         commandLine: String,
         tty: String,
@@ -149,6 +167,7 @@ class DetectedAgent: ObservableObject, Identifiable {
         self.pid = pid
         self.kind = kind
         self.startTime = startTime
+        self.processWorkingDirectory = processWorkingDirectory
         self.workingDirectory = workingDirectory
         self.commandLine = commandLine
         self.tty = tty
@@ -195,9 +214,17 @@ class AgentMonitor: ObservableObject {
     }
 
     private func scan() {
+        let cachedCodexSessionPathsByPID = Dictionary(
+            uniqueKeysWithValues: agents.map { ($0.pid, $0.codexSessionPath) }
+        )
+
         DispatchQueue.global(qos: .background).async { [weak self] in
             guard let self = self else { return }
-            let found = self.resolveGitContext(for: self.detectAgents())
+            let found = self.resolveGitContext(
+                for: self.resolveCodexWorkingDirectories(
+                    for: self.detectAgents(cachedCodexSessionPathsByPID: cachedCodexSessionPathsByPID)
+                )
+            )
 
             DispatchQueue.main.async {
                 self.reconcile(found)
@@ -209,7 +236,7 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Layer 1: Detect agents via pgrep
 
-    private func detectAgents() -> [DetectedAgentSnapshot] {
+    private func detectAgents(cachedCodexSessionPathsByPID: [Int32: String?]) -> [DetectedAgentSnapshot] {
         var results: [DetectedAgentSnapshot] = []
         let myPID = ProcessInfo.processInfo.processIdentifier
         let now = Date()
@@ -253,18 +280,20 @@ class AgentMonitor: ObservableObject {
                 seenTTYs.insert(tty)
 
                 let cmd = parts.count >= 4 ? String(parts[3]) : agent.binaryName
-                let cwd = getWorkingDirectory(for: pid)
+                let processWorkingDirectory = getWorkingDirectory(for: pid)
                 results.append(
                     DetectedAgentSnapshot(
                         pid: pid,
                         kind: agent,
                         startTime: now.addingTimeInterval(-elapsedTime),
-                        cwd: cwd,
+                        processWorkingDirectory: processWorkingDirectory,
+                        workingDirectory: processWorkingDirectory,
                         cmd: cmd,
                         tty: tty,
                         codexSessionIDHint: agent.binaryName == "codex"
                             ? Self.codexResumeSessionID(from: cmd)
-                            : nil
+                            : nil,
+                        codexSessionPath: cachedCodexSessionPathsByPID[pid] ?? nil
                     )
                 )
                 seenPIDs.insert(pid)
@@ -294,7 +323,8 @@ class AgentMonitor: ObservableObject {
                     pid: item.pid,
                     kind: item.kind,
                     startTime: item.startTime,
-                    workingDirectory: item.cwd,
+                    processWorkingDirectory: item.processWorkingDirectory,
+                    workingDirectory: item.workingDirectory,
                     commandLine: item.cmd,
                     tty: item.tty,
                     codexSessionIDHint: item.codexSessionIDHint
@@ -313,6 +343,7 @@ class AgentMonitor: ObservableObject {
                 }
                 agent.gitBranch = item.gitBranch
                 agent.gitRepoRoot = item.gitRepoRoot
+                agent.codexSessionPath = item.codexSessionPath
                 agents.append(agent)
                 knownPIDs.insert(item.pid)
             }
@@ -320,10 +351,14 @@ class AgentMonitor: ObservableObject {
 
         for agent in agents {
             guard let item = foundByPID[agent.pid] else { continue }
-            if agent.codexSessionIDHint != item.codexSessionIDHint || agent.workingDirectory != item.cwd {
+            if agent.codexSessionIDHint != item.codexSessionIDHint {
                 agent.codexSessionPath = nil
             }
-            agent.workingDirectory = item.cwd
+            if let codexSessionPath = item.codexSessionPath {
+                agent.codexSessionPath = codexSessionPath
+            }
+            agent.processWorkingDirectory = item.processWorkingDirectory
+            agent.workingDirectory = item.workingDirectory
             agent.commandLine = item.cmd
             agent.tty = item.tty
             agent.codexSessionIDHint = item.codexSessionIDHint
@@ -344,12 +379,45 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Git Context
 
+    private func resolveCodexWorkingDirectories(
+        for detections: [DetectedAgentSnapshot]
+    ) -> [DetectedAgentSnapshot] {
+        let sessionsRoot = NSHomeDirectory() + "/.codex/sessions"
+
+        return detections.map { detection in
+            guard detection.kind.binaryName == "codex" else { return detection }
+
+            var detection = detection
+            let lookup = codexSessionLookup(
+                for: CodexSessionLookupContext(
+                    startTime: detection.startTime,
+                    processWorkingDirectory: detection.processWorkingDirectory,
+                    sessionIDHint: detection.codexSessionIDHint,
+                    cachedSessionPath: detection.codexSessionPath
+                ),
+                in: sessionsRoot
+            )
+
+            if let sessionPath = lookup.path {
+                detection.codexSessionPath = sessionPath
+            }
+            if let metadata = lookup.metadata {
+                detection.workingDirectory = metadata.cwd
+            }
+
+            return detection
+        }
+    }
+
     private func resolveGitContext(for detections: [DetectedAgentSnapshot]) -> [DetectedAgentSnapshot] {
         detections.map { detection in
             var detection = detection
-            if let gitContext = gitContext(for: detection.cwd) {
+            if let gitContext = gitContext(for: detection.workingDirectory) {
                 detection.gitBranch = gitContext.branch
                 detection.gitRepoRoot = gitContext.repoRoot
+            } else {
+                detection.gitBranch = nil
+                detection.gitRepoRoot = nil
             }
             return detection
         }
@@ -872,10 +940,30 @@ class AgentMonitor: ObservableObject {
 
     private func codexStatusFromSession(_ agent: DetectedAgent) -> StatusDecision? {
         let sessionsRoot = NSHomeDirectory() + "/.codex/sessions"
-        let sessionLookup = codexSessionPath(for: agent, in: sessionsRoot)
+        let sessionLookup = codexSessionLookup(
+            for: CodexSessionLookupContext(
+                startTime: agent.startTime,
+                processWorkingDirectory: agent.processWorkingDirectory,
+                sessionIDHint: agent.codexSessionIDHint,
+                cachedSessionPath: agent.codexSessionPath
+            ),
+            in: sessionsRoot
+        )
         guard let sessionPath = sessionLookup.path else {
             logCodexFallbackIfNeeded(for: agent, reason: sessionLookup.debug)
             return nil
+        }
+
+        agent.codexSessionPath = sessionPath
+        if let metadata = sessionLookup.metadata {
+            agent.workingDirectory = metadata.cwd
+            if let gitContext = gitContext(for: metadata.cwd) {
+                agent.gitBranch = gitContext.branch
+                agent.gitRepoRoot = gitContext.repoRoot
+            } else {
+                agent.gitBranch = nil
+                agent.gitRepoRoot = nil
+            }
         }
 
         let statusProbe = codexStatus(fromSessionFile: sessionPath)
@@ -888,50 +976,61 @@ class AgentMonitor: ObservableObject {
         return decision
     }
 
-    private func codexSessionPath(
-        for agent: DetectedAgent,
+    private func codexSessionLookup(
+        for context: CodexSessionLookupContext,
         in root: String
-    ) -> (path: String?, debug: String) {
+    ) -> CodexSessionLookupResult {
         let fm = FileManager.default
 
-        if let path = agent.codexSessionPath, fm.fileExists(atPath: path) {
-            if agent.codexSessionIDHint != nil {
-                return (path, "lookup=cached session=\(URL(fileURLWithPath: path).lastPathComponent)")
-            }
-
-            let validation = validateCodexSessionPath(path, for: agent)
+        if let path = context.cachedSessionPath, fm.fileExists(atPath: path) {
+            let validation = validateCodexSessionPath(path, for: context)
             if validation.isValid {
-                if let refreshed = refreshedCodexSessionPathIfNeeded(
+                if let refreshed = refreshedCodexSessionLookupIfNeeded(
                     currentPath: path,
                     currentDelta: validation.startDelta,
-                    for: agent,
+                    for: context,
                     in: root
                 ) {
-                    agent.codexSessionPath = refreshed.path
-                    return (refreshed.path, refreshed.debug)
+                    return refreshed
                 }
-                return (path, validation.debug)
+                return CodexSessionLookupResult(
+                    path: path,
+                    metadata: validation.metadata,
+                    startDelta: validation.startDelta,
+                    debug: validation.debug
+                )
             }
-
-            agent.codexSessionPath = nil
         }
 
-        if let sessionID = agent.codexSessionIDHint,
+        if let sessionID = context.sessionIDHint,
            let path = codexSessionPath(forSessionID: sessionID, in: root) {
-            agent.codexSessionPath = path
-            return (path, "lookup=resume_hint hint=\(sessionID) session=\(URL(fileURLWithPath: path).lastPathComponent)")
+            return CodexSessionLookupResult(
+                path: path,
+                metadata: codexSessionMetadata(at: path),
+                startDelta: nil,
+                debug: "lookup=resume_hint hint=\(sessionID) session=\(URL(fileURLWithPath: path).lastPathComponent)"
+            )
         }
 
-        let bestMatch = bestCodexSessionPath(in: root, agent: agent)
+        let bestMatch = bestCodexSessionPath(in: root, context: context)
         guard let path = bestMatch.path else {
-            if let sessionID = agent.codexSessionIDHint {
-                return (nil, "lookup=resume_hint_miss hint=\(sessionID) \(bestMatch.debug)")
+            if let sessionID = context.sessionIDHint {
+                return CodexSessionLookupResult(
+                    path: nil,
+                    metadata: nil,
+                    startDelta: nil,
+                    debug: "lookup=resume_hint_miss hint=\(sessionID) \(bestMatch.debug)"
+                )
             }
-            return (nil, bestMatch.debug)
+            return bestMatch
         }
 
-        agent.codexSessionPath = path
-        return (path, bestMatch.debug)
+        return CodexSessionLookupResult(
+            path: path,
+            metadata: bestMatch.metadata,
+            startDelta: bestMatch.startDelta,
+            debug: bestMatch.debug
+        )
     }
 
     private func codexSessionPath(forSessionID sessionID: String, in root: String) -> String? {
@@ -955,11 +1054,16 @@ class AgentMonitor: ObservableObject {
 
     private func bestCodexSessionPath(
         in root: String,
-        agent: DetectedAgent
-    ) -> (path: String?, startDelta: TimeInterval?, debug: String) {
+        context: CodexSessionLookupContext
+    ) -> CodexSessionLookupResult {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(atPath: root) else {
-            return (nil, nil, "lookup=best_match root_unreadable root=\(root)")
+            return CodexSessionLookupResult(
+                path: nil,
+                metadata: nil,
+                startDelta: nil,
+                debug: "lookup=best_match root_unreadable root=\(root)"
+            )
         }
 
         var candidates: [(path: String, modifiedAt: Date)] = []
@@ -972,10 +1076,12 @@ class AgentMonitor: ObservableObject {
             candidates.append((path, modifiedAt))
         }
 
-        var bestMatch: (path: String, modifiedAt: Date, startDelta: TimeInterval)?
-        var closestCwdMatch: (path: String, startDelta: TimeInterval)?
+        var bestStartMatch: (path: String, metadata: CodexSessionMetadata, modifiedAt: Date, startDelta: TimeInterval)?
+        var secondBestStartMatch: (path: String, startDelta: TimeInterval)?
+        var closestProcessCwdMatch: (path: String, startDelta: TimeInterval)?
         var parsedMetadataCount = 0
-        var cwdMatchCount = 0
+        var processCwdMatchCount = 0
+        var startMatchCount = 0
         var metadataFailureCounts: [String: Int] = [:]
         var metadataFailureSamples: [String] = []
 
@@ -991,96 +1097,115 @@ class AgentMonitor: ObservableObject {
 
             parsedMetadataCount += 1
 
-            guard metadata.cwd == agent.workingDirectory else {
-                continue
+            if metadata.cwd == context.processWorkingDirectory {
+                processCwdMatchCount += 1
             }
 
-            cwdMatchCount += 1
-            let startDelta = abs(metadata.startedAt.timeIntervalSince(agent.startTime))
+            let startDelta = abs(metadata.startedAt.timeIntervalSince(context.startTime))
 
-            if closestCwdMatch == nil || startDelta < closestCwdMatch!.startDelta {
-                closestCwdMatch = (candidate.path, startDelta)
+            if metadata.cwd == context.processWorkingDirectory,
+               (closestProcessCwdMatch == nil || startDelta < closestProcessCwdMatch!.startDelta) {
+                closestProcessCwdMatch = (candidate.path, startDelta)
             }
 
             guard startDelta <= Self.codexSessionStartDeltaTolerance else {
                 continue
             }
 
-            if bestMatch == nil ||
-                startDelta < bestMatch!.startDelta ||
-                (startDelta == bestMatch!.startDelta && candidate.modifiedAt > bestMatch!.modifiedAt) {
-                bestMatch = (candidate.path, candidate.modifiedAt, startDelta)
+            startMatchCount += 1
+
+            let candidateMatchesProcessCwd = metadata.cwd == context.processWorkingDirectory
+            let currentBestMatchesProcessCwd = bestStartMatch?.metadata.cwd == context.processWorkingDirectory
+
+            if bestStartMatch == nil ||
+                startDelta < bestStartMatch!.startDelta ||
+                (
+                    abs(startDelta - bestStartMatch!.startDelta) < 1 &&
+                    candidateMatchesProcessCwd &&
+                    !currentBestMatchesProcessCwd
+                ) ||
+                (
+                    abs(startDelta - bestStartMatch!.startDelta) < 1 &&
+                    candidateMatchesProcessCwd == currentBestMatchesProcessCwd &&
+                    candidate.modifiedAt > bestStartMatch!.modifiedAt
+                ) {
+                if let currentBest = bestStartMatch {
+                    secondBestStartMatch = (currentBest.path, currentBest.startDelta)
+                }
+                bestStartMatch = (candidate.path, metadata, candidate.modifiedAt, startDelta)
+            } else if secondBestStartMatch == nil || startDelta < secondBestStartMatch!.startDelta {
+                secondBestStartMatch = (candidate.path, startDelta)
             }
         }
 
         let failureSummary = Self.formatCountSummary(metadataFailureCounts)
-        if let bestMatch {
-            return (
-                bestMatch.path,
-                bestMatch.startDelta,
-                "lookup=best_match session=\(URL(fileURLWithPath: bestMatch.path).lastPathComponent) delta=\(Int(bestMatch.startDelta))s candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount)"
+        if let bestStartMatch {
+            let secondDelta = secondBestStartMatch.map { Int($0.startDelta) } ?? -1
+            let mode = bestStartMatch.metadata.cwd == context.processWorkingDirectory
+                ? "start_time+process_cwd_tiebreak"
+                : "start_only"
+            return CodexSessionLookupResult(
+                path: bestStartMatch.path,
+                metadata: bestStartMatch.metadata,
+                startDelta: bestStartMatch.startDelta,
+                debug: "lookup=best_match mode=\(mode) session=\(URL(fileURLWithPath: bestStartMatch.path).lastPathComponent) delta=\(Int(bestStartMatch.startDelta))s second_delta=\(secondDelta) candidates=\(candidates.count) parsed=\(parsedMetadataCount) start_matches=\(startMatchCount) process_cwd=\(context.processWorkingDirectory) process_cwd_matches=\(processCwdMatchCount)"
             )
         }
 
-        if let closestCwdMatch {
-            return (
-                nil,
-                nil,
-                "lookup=best_match_too_old closest_session=\(URL(fileURLWithPath: closestCwdMatch.path).lastPathComponent) delta=\(Int(closestCwdMatch.startDelta))s limit=\(Int(Self.codexSessionStartDeltaTolerance))s cwd=\(agent.workingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount)"
+        if let closestProcessCwdMatch {
+            return CodexSessionLookupResult(
+                path: nil,
+                metadata: nil,
+                startDelta: nil,
+                debug: "lookup=best_match_too_old closest_session=\(URL(fileURLWithPath: closestProcessCwdMatch.path).lastPathComponent) delta=\(Int(closestProcessCwdMatch.startDelta))s limit=\(Int(Self.codexSessionStartDeltaTolerance))s process_cwd=\(context.processWorkingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) process_cwd_matches=\(processCwdMatchCount)"
             )
         }
 
         let sampleSummary = metadataFailureSamples.isEmpty ? "-" : metadataFailureSamples.joined(separator: ",")
-        return (
-            nil,
-            nil,
-            "lookup=best_match_miss cwd=\(agent.workingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) cwd_matches=\(cwdMatchCount) metadata_failures=\(failureSummary) samples=\(sampleSummary)"
+        return CodexSessionLookupResult(
+            path: nil,
+            metadata: nil,
+            startDelta: nil,
+            debug: "lookup=best_match_miss process_cwd=\(context.processWorkingDirectory) candidates=\(candidates.count) parsed=\(parsedMetadataCount) start_matches=\(startMatchCount) process_cwd_matches=\(processCwdMatchCount) metadata_failures=\(failureSummary) samples=\(sampleSummary)"
         )
     }
 
     private func validateCodexSessionPath(
         _ path: String,
-        for agent: DetectedAgent
-    ) -> (isValid: Bool, startDelta: TimeInterval, debug: String) {
+        for context: CodexSessionLookupContext
+    ) -> (isValid: Bool, metadata: CodexSessionMetadata?, startDelta: TimeInterval, debug: String) {
         let sessionName = URL(fileURLWithPath: path).lastPathComponent
 
         guard let metadata = codexSessionMetadata(at: path) else {
             let failure = codexSessionMetadataFailureCache[path] ?? "metadata_unavailable"
-            return (false, .infinity, "lookup=cached_invalid session=\(sessionName) reason=\(failure)")
+            return (false, nil, .infinity, "lookup=cached_invalid session=\(sessionName) reason=\(failure)")
         }
 
-        guard metadata.cwd == agent.workingDirectory else {
-            return (
-                false,
-                .infinity,
-                "lookup=cached_invalid session=\(sessionName) reason=cwd_mismatch session_cwd=\(metadata.cwd) cwd=\(agent.workingDirectory)"
-            )
-        }
-
-        let startDelta = abs(metadata.startedAt.timeIntervalSince(agent.startTime))
+        let startDelta = abs(metadata.startedAt.timeIntervalSince(context.startTime))
         guard startDelta <= Self.codexSessionStartDeltaTolerance else {
             return (
                 false,
+                metadata,
                 startDelta,
                 "lookup=cached_invalid session=\(sessionName) reason=start_delta delta=\(Int(startDelta))s limit=\(Int(Self.codexSessionStartDeltaTolerance))s"
             )
         }
 
-        return (true, startDelta, "lookup=cached session=\(sessionName) delta=\(Int(startDelta))s")
+        return (true, metadata, startDelta, "lookup=cached session=\(sessionName) delta=\(Int(startDelta))s")
     }
 
-    private func refreshedCodexSessionPathIfNeeded(
+    private func refreshedCodexSessionLookupIfNeeded(
         currentPath: String,
         currentDelta: TimeInterval,
-        for agent: DetectedAgent,
+        for context: CodexSessionLookupContext,
         in root: String
-    ) -> (path: String, debug: String)? {
+    ) -> CodexSessionLookupResult? {
         // Session files can appear a moment after the Codex process starts.
-        // If we cached a loose in-cwd match first, re-run matching until we find
+        // If we cached a loose match first, re-run matching until we find
         // a tighter start-time match for this process.
         guard currentDelta > Self.codexSessionPinnedStartDeltaTolerance else { return nil }
 
-        let bestMatch = bestCodexSessionPath(in: root, agent: agent)
+        let bestMatch = bestCodexSessionPath(in: root, context: context)
         guard let bestPath = bestMatch.path,
               let bestDelta = bestMatch.startDelta,
               bestPath != currentPath,
@@ -1089,9 +1214,11 @@ class AgentMonitor: ObservableObject {
         }
 
         let previousSession = URL(fileURLWithPath: currentPath).lastPathComponent
-        return (
-            bestPath,
-            "lookup=cached_replaced previous_session=\(previousSession) previous_delta=\(Int(currentDelta))s \(bestMatch.debug)"
+        return CodexSessionLookupResult(
+            path: bestPath,
+            metadata: bestMatch.metadata,
+            startDelta: bestDelta,
+            debug: "lookup=cached_replaced previous_session=\(previousSession) previous_delta=\(Int(currentDelta))s \(bestMatch.debug)"
         )
     }
 
@@ -1308,6 +1435,7 @@ class AgentMonitor: ObservableObject {
     private func logCodexFallbackIfNeeded(for agent: DetectedAgent, reason: String) {
         let fingerprint = [
             agent.workingDirectory,
+            agent.processWorkingDirectory,
             agent.codexSessionIDHint ?? "-",
             reason
         ].joined(separator: "|")
@@ -1499,7 +1627,7 @@ class AgentMonitor: ObservableObject {
 
     func activateAgent(_ agent: DetectedAgent) {
         let ownerPID = agent.ownerAppPID ?? findOwnerAppPID(pid: agent.pid)
-        let folderName = URL(fileURLWithPath: agent.workingDirectory).lastPathComponent
+        let folderName = URL(fileURLWithPath: agent.processWorkingDirectory).lastPathComponent
 
         guard let appPID = ownerPID,
               let app = NSRunningApplication(processIdentifier: appPID) else {
