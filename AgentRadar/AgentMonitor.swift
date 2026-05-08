@@ -230,9 +230,24 @@ class AgentMonitor: ObservableObject {
 
         DispatchQueue.global(qos: .background).async { [weak self] in
             guard let self = self else { return }
+            let processTable = ProcessInspector.snapshot()
+            guard processTable.isValid else {
+                DispatchQueue.main.async {
+                    self.isScanInFlight = false
+
+                    if self.scanRequestedWhileRunning {
+                        self.scan()
+                    }
+                }
+                return
+            }
+
             let found = self.resolveGitContext(
                 for: self.resolveCodexWorkingDirectories(
-                    for: self.detectAgents(cachedCodexSessionPathsByPID: cachedCodexSessionPathsByPID)
+                    for: self.detectAgents(
+                        cachedCodexSessionPathsByPID: cachedCodexSessionPathsByPID,
+                        processTable: processTable
+                    )
                 )
             )
 
@@ -245,7 +260,7 @@ class AgentMonitor: ObservableObject {
                     }
                 }
 
-                self.reconcile(found)
+                self.reconcile(found, processTable: processTable)
                 self.lastScan = Date()
                 self.onUpdate?(self.agents)
             }
@@ -254,7 +269,10 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Layer 1: Detect agents via pgrep
 
-    private func detectAgents(cachedCodexSessionPathsByPID: [Int32: String?]) -> [DetectedAgentSnapshot] {
+    private func detectAgents(
+        cachedCodexSessionPathsByPID: [Int32: String?],
+        processTable: ProcessTable
+    ) -> [DetectedAgentSnapshot] {
         var results: [DetectedAgentSnapshot] = []
         let myPID = ProcessInfo.processInfo.processIdentifier
         let now = Date()
@@ -281,23 +299,17 @@ class AgentMonitor: ObservableObject {
             for pid in pids {
                 if pid == myPID || seenPIDs.contains(pid) { continue }
 
-                // Get details: elapsed runtime, tty, stat, args
-                let details = shell("ps -p \(pid) -o etime=,tty=,stat=,args= 2>/dev/null")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !details.isEmpty else { continue }
+                guard let row = processTable.row(for: pid) else { continue }
 
-                let parts = details.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
-                guard parts.count >= 3 else { continue }
-
-                let elapsedTime = Self.elapsedTime(from: String(parts[0]))
-                let tty = String(parts[1])
+                let elapsedTime = Self.elapsedTime(from: row.elapsedTime)
+                let tty = row.tty
                 // Skip processes not on a real TTY (GUI apps show "??")
                 guard tty != "??" else { continue }
                 // Skip duplicate agents on the same TTY (child node workers)
                 guard !seenTTYs.contains(tty) else { continue }
                 seenTTYs.insert(tty)
 
-                let cmd = parts.count >= 4 ? String(parts[3]) : agent.binaryName
+                let cmd = row.commandLine.isEmpty ? agent.binaryName : row.commandLine
                 let processWorkingDirectory = getWorkingDirectory(for: pid)
                 results.append(
                     DetectedAgentSnapshot(
@@ -322,7 +334,7 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Reconcile
 
-    private func reconcile(_ found: [DetectedAgentSnapshot]) {
+    private func reconcile(_ found: [DetectedAgentSnapshot], processTable: ProcessTable) {
         let foundPIDs = Set(found.map { $0.pid })
         let foundByPID = Dictionary(uniqueKeysWithValues: found.map { ($0.pid, $0) })
         let deadPIDs = Set(agents.map { $0.pid }).subtracting(foundPIDs)
@@ -373,7 +385,7 @@ class AgentMonitor: ObservableObject {
         }
 
         for agent in agents {
-            updateStats(agent)
+            updateStats(agent, processTable: processTable)
         }
 
         agents.sort(by: Self.menuSortsBefore)
@@ -667,25 +679,18 @@ class AgentMonitor: ObservableObject {
 
     // MARK: - Status Detection
 
-    private func updateStats(_ agent: DetectedAgent) {
-        // Get CPU and memory
-        let statsOutput = shell("ps -p \(agent.pid) -o %cpu=,rss=,stat= 2>/dev/null")
-        let statsParts = statsOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: " ", omittingEmptySubsequences: true)
-
+    private func updateStats(_ agent: DetectedAgent, processTable: ProcessTable) {
         var procState = ""
-        if statsParts.count >= 2 {
-            agent.cpuPercent = Double(statsParts[0]) ?? 0
-            agent.memoryMB = (Double(statsParts[1]) ?? 0) / 1024.0
-        }
-        if statsParts.count >= 3 {
-            procState = String(statsParts[2])
+        if let row = processTable.row(for: agent.pid) {
+            agent.cpuPercent = row.cpuPercent
+            agent.memoryMB = Double(row.rssKB) / 1024.0
+            procState = row.stat
         }
 
         // Check if process is backgrounded or stopped first
         let isForeground = procState.contains("+")
         let isStopped = procState.contains("T")
-        let treeCPU = totalTreeCPU(for: agent.pid)
+        let treeCPU = processTable.treeCPU(for: agent.pid)
 
         if isStopped {
             applyStatusDecision(
@@ -737,35 +742,23 @@ class AgentMonitor: ObservableObject {
         }
 
         // Fallback for other agents: check child processes
-        let childPids = shell("pgrep -P \(agent.pid) 2>/dev/null")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
         var hasActiveChildren = false
         var bestChild = ""
 
-        if !childPids.isEmpty {
-            let pidList = childPids.components(separatedBy: "\n").joined(separator: ",")
-            let childOutput = shell("ps -o stat=,args= -p \(pidList) 2>/dev/null")
+        for child in processTable.children(of: agent.pid) {
+            let stat = child.stat
+            let childCmd = child.commandLine
 
-            for childLine in childOutput.components(separatedBy: "\n") {
-                let trimmed = childLine.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty else { continue }
-                let cParts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-                guard cParts.count >= 2 else { continue }
-                let stat = String(cParts[0])
-                let childCmd = String(cParts[1])
+            if childCmd.contains("pgrep") || childCmd.contains("ps -o") || childCmd.contains("ps -p") { continue }
+            // Skip child processes that are the agent's own worker (e.g. node re-spawning gemini)
+            if childCmd.contains("bin/\(agent.kind.binaryName)") { continue }
+            let cmdLower = childCmd.lowercased()
+            if cmdLower.hasPrefix("caffeinate") || cmdLower.hasPrefix("sleep") { continue }
 
-                if childCmd.contains("pgrep") || childCmd.contains("ps -o") || childCmd.contains("ps -p") { continue }
-                // Skip child processes that are the agent's own worker (e.g. node re-spawning gemini)
-                if childCmd.contains("bin/\(agent.kind.binaryName)") { continue }
-                let cmdLower = childCmd.lowercased()
-                if cmdLower.hasPrefix("caffeinate") || cmdLower.hasPrefix("sleep") { continue }
-
-                if stat.contains("R") || (stat.contains("S") && stat.contains("+") && !stat.contains("T")) {
-                    hasActiveChildren = true
-                    if bestChild.isEmpty {
-                        bestChild = Self.readableCommand(childCmd)
-                    }
+            if stat.contains("R") || (stat.contains("S") && stat.contains("+") && !stat.contains("T")) {
+                hasActiveChildren = true
+                if bestChild.isEmpty {
+                    bestChild = Self.readableCommand(childCmd)
                 }
             }
         }
@@ -1782,23 +1775,6 @@ class AgentMonitor: ObservableObject {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-    }
-
-    /// Sum CPU% for a process and all its descendants
-    private func totalTreeCPU(for pid: Int32) -> Double {
-        let output = shell("ps -p \(pid) -o %cpu= 2>/dev/null")
-        var total = Double(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-
-        let childPids = shell("pgrep -P \(pid) 2>/dev/null")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !childPids.isEmpty {
-            for line in childPids.components(separatedBy: "\n") {
-                if let childPid = Int32(line.trimmingCharacters(in: .whitespaces)) {
-                    total += totalTreeCPU(for: childPid)
-                }
-            }
-        }
-        return total
     }
 
     private func getWorkingDirectory(for pid: Int32) -> String {
