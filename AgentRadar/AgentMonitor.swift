@@ -38,7 +38,17 @@ struct KnownAgent {
     ]
 }
 
+fileprivate struct AgentProcessIdentity: Hashable {
+    let pid: Int32
+    let startTime: Date
+
+    var id: String {
+        "\(pid)-\(Int64(startTime.timeIntervalSince1970.rounded()))"
+    }
+}
+
 private struct DetectedAgentSnapshot {
+    let processIdentity: AgentProcessIdentity
     let pid: Int32
     let kind: KnownAgent
     let startTime: Date
@@ -50,6 +60,40 @@ private struct DetectedAgentSnapshot {
     var codexSessionPath: String?
     var gitBranch: String?
     var gitRepoRoot: String?
+}
+
+private struct AgentDetailCacheEntry {
+    let processWorkingDirectory: String
+    let workingDirectory: String
+    let codexSessionPath: String?
+    let gitBranch: String?
+    let gitRepoRoot: String?
+}
+
+private struct AgentDetailHydrationTarget {
+    let processIdentity: AgentProcessIdentity
+    let pid: Int32
+    let kind: KnownAgent
+    let startTime: Date
+    let processWorkingDirectory: String
+    let workingDirectory: String
+    let codexSessionIDHint: String?
+    let codexSessionPath: String?
+}
+
+private struct AgentDetailHydrationResult {
+    let processIdentity: AgentProcessIdentity
+    let processWorkingDirectory: String
+    let workingDirectory: String
+    let codexSessionPath: String?
+    let gitBranch: String?
+    let gitRepoRoot: String?
+}
+
+private struct RecentFileInfo {
+    let path: String
+    let modifiedAt: Date
+    let fileSize: UInt64
 }
 
 private struct GitRepoCacheEntry {
@@ -86,6 +130,23 @@ private struct CodexSessionLookupResult {
     let debug: String
 }
 
+private struct CodexStatusProbe {
+    let decision: StatusDecision?
+    let debug: String
+}
+
+private struct CodexStatusCacheEntry {
+    let fileSize: UInt64
+    let modifiedAt: Date?
+    let probe: CodexStatusProbe
+}
+
+private struct ClaudeTranscriptEntryCacheEntry {
+    let fileSize: UInt64
+    let modifiedAt: Date
+    let entry: [String: Any]?
+}
+
 private struct StatusDecision {
     let status: AgentStatus
     let activity: String
@@ -98,6 +159,7 @@ private struct StatusDecision {
 
 class DetectedAgent: ObservableObject, Identifiable {
     let id: String
+    fileprivate let processIdentity: AgentProcessIdentity
     let pid: Int32
     let kind: KnownAgent
     let startTime: Date
@@ -153,7 +215,8 @@ class DetectedAgent: ObservableObject, Identifiable {
         return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
     }
 
-    init(
+    fileprivate init(
+        processIdentity: AgentProcessIdentity,
         pid: Int32,
         kind: KnownAgent,
         startTime: Date,
@@ -163,7 +226,8 @@ class DetectedAgent: ObservableObject, Identifiable {
         tty: String,
         codexSessionIDHint: String?
     ) {
-        self.id = "\(pid)"
+        self.id = processIdentity.id
+        self.processIdentity = processIdentity
         self.pid = pid
         self.kind = kind
         self.startTime = startTime
@@ -187,14 +251,20 @@ class AgentMonitor: ObservableObject {
     private var timer: Timer?
     private var isScanInFlight = false
     private var scanRequestedWhileRunning = false
-    private var knownPIDs: Set<Int32> = []
+    private var isDetailRefreshInFlight = false
+    private var detailRefreshRequestedWhileRunning = false
+    private var knownProcessIdentities: Set<AgentProcessIdentity> = []
+    private var detailCacheByIdentity: [AgentProcessIdentity: AgentDetailCacheEntry] = [:]
+    private let detailRefreshQueue = DispatchQueue(label: "AgentRadar.AgentMonitor.detailRefresh", qos: .utility)
     private var gitRepoCache: [String: GitRepoCacheEntry] = [:]
     private var gitLookupCache: [String: GitLookupCacheEntry] = [:]
     private var codexSessionPathCache: [String: String] = [:]
     private var codexSessionMetadataCache: [String: CodexSessionMetadata] = [:]
     private var codexSessionMetadataFailureCache: [String: String] = [:]
-    private var statusDecisionLogCache: [Int32: String] = [:]
-    private var codexFallbackLogCache: [Int32: String] = [:]
+    private var codexStatusCache: [String: CodexStatusCacheEntry] = [:]
+    private var claudeTranscriptEntryCache: [String: ClaudeTranscriptEntryCacheEntry] = [:]
+    private var statusDecisionLogCache: [AgentProcessIdentity: String] = [:]
+    private var codexFallbackLogCache: [AgentProcessIdentity: String] = [:]
     private let nonGitCacheTTL: TimeInterval = 10
     private lazy var statusLogURL: URL = {
         let logsDirectory = URL(fileURLWithPath: NSHomeDirectory())
@@ -215,6 +285,48 @@ class AgentMonitor: ObservableObject {
         timer = nil
     }
 
+    func refreshPopoverDetails() {
+        if isDetailRefreshInFlight {
+            detailRefreshRequestedWhileRunning = true
+            return
+        }
+
+        let targets = agents.map {
+            AgentDetailHydrationTarget(
+                processIdentity: $0.processIdentity,
+                pid: $0.pid,
+                kind: $0.kind,
+                startTime: $0.startTime,
+                processWorkingDirectory: $0.processWorkingDirectory,
+                workingDirectory: $0.workingDirectory,
+                codexSessionIDHint: $0.codexSessionIDHint,
+                codexSessionPath: $0.codexSessionPath
+            )
+        }
+
+        guard !targets.isEmpty else { return }
+
+        isDetailRefreshInFlight = true
+        detailRefreshRequestedWhileRunning = false
+
+        detailRefreshQueue.async { [weak self] in
+            guard let self = self else { return }
+            let results = targets.map { self.hydrateDetails(for: $0) }
+
+            DispatchQueue.main.async {
+                defer {
+                    self.isDetailRefreshInFlight = false
+
+                    if self.detailRefreshRequestedWhileRunning {
+                        self.refreshPopoverDetails()
+                    }
+                }
+
+                self.applyHydratedDetails(results)
+            }
+        }
+    }
+
     private func scan() {
         if isScanInFlight {
             scanRequestedWhileRunning = true
@@ -224,8 +336,9 @@ class AgentMonitor: ObservableObject {
         isScanInFlight = true
         scanRequestedWhileRunning = false
 
-        let cachedCodexSessionPathsByPID = Dictionary(
-            uniqueKeysWithValues: agents.map { ($0.pid, $0.codexSessionPath) }
+        let cachedDetailsByIdentity = detailCacheByIdentity
+        let existingIdentitiesByPID = Dictionary(
+            uniqueKeysWithValues: agents.map { ($0.pid, $0.processIdentity) }
         )
 
         DispatchQueue.global(qos: .background).async { [weak self] in
@@ -242,13 +355,10 @@ class AgentMonitor: ObservableObject {
                 return
             }
 
-            let found = self.resolveGitContext(
-                for: self.resolveCodexWorkingDirectories(
-                    for: self.detectAgents(
-                        cachedCodexSessionPathsByPID: cachedCodexSessionPathsByPID,
-                        processTable: processTable
-                    )
-                )
+            let found = self.detectAgents(
+                cachedDetailsByIdentity: cachedDetailsByIdentity,
+                existingIdentitiesByPID: existingIdentitiesByPID,
+                processTable: processTable
             )
 
             DispatchQueue.main.async {
@@ -267,10 +377,82 @@ class AgentMonitor: ObservableObject {
         }
     }
 
+    private func hydrateDetails(for target: AgentDetailHydrationTarget) -> AgentDetailHydrationResult {
+        let refreshedProcessWorkingDirectory = getWorkingDirectory(for: target.pid)
+        let processWorkingDirectory = refreshedProcessWorkingDirectory
+            ?? target.processWorkingDirectory
+        var workingDirectory = refreshedProcessWorkingDirectory
+            ?? target.workingDirectory
+        var codexSessionPath = target.codexSessionPath
+        var gitBranch: String?
+        var gitRepoRoot: String?
+
+        if target.kind.binaryName == "codex" {
+            let lookup = codexSessionLookup(
+                for: CodexSessionLookupContext(
+                    startTime: target.startTime,
+                    processWorkingDirectory: processWorkingDirectory,
+                    sessionIDHint: target.codexSessionIDHint,
+                    cachedSessionPath: target.codexSessionPath
+                ),
+                in: NSHomeDirectory() + "/.codex/sessions"
+            )
+
+            if let sessionPath = lookup.path {
+                codexSessionPath = sessionPath
+            }
+            if let metadata = lookup.metadata {
+                workingDirectory = metadata.cwd
+            }
+        }
+
+        if let gitContext = gitContext(for: workingDirectory) {
+            gitBranch = gitContext.branch
+            gitRepoRoot = gitContext.repoRoot
+        }
+
+        return AgentDetailHydrationResult(
+            processIdentity: target.processIdentity,
+            processWorkingDirectory: processWorkingDirectory,
+            workingDirectory: workingDirectory,
+            codexSessionPath: codexSessionPath,
+            gitBranch: gitBranch,
+            gitRepoRoot: gitRepoRoot
+        )
+    }
+
+    private func applyHydratedDetails(_ results: [AgentDetailHydrationResult]) {
+        let liveIdentities = Set(agents.map { $0.processIdentity })
+
+        for result in results where liveIdentities.contains(result.processIdentity) {
+            detailCacheByIdentity[result.processIdentity] = AgentDetailCacheEntry(
+                processWorkingDirectory: result.processWorkingDirectory,
+                workingDirectory: result.workingDirectory,
+                codexSessionPath: result.codexSessionPath,
+                gitBranch: result.gitBranch,
+                gitRepoRoot: result.gitRepoRoot
+            )
+
+            guard let agent = agents.first(where: { $0.processIdentity == result.processIdentity }) else {
+                continue
+            }
+
+            agent.processWorkingDirectory = result.processWorkingDirectory
+            agent.workingDirectory = result.workingDirectory
+            agent.codexSessionPath = result.codexSessionPath
+            agent.gitBranch = result.gitBranch
+            agent.gitRepoRoot = result.gitRepoRoot
+        }
+
+        agents.sort(by: Self.menuSortsBefore)
+        onUpdate?(agents)
+    }
+
     // MARK: - Layer 1: Detect agents via pgrep
 
     private func detectAgents(
-        cachedCodexSessionPathsByPID: [Int32: String?],
+        cachedDetailsByIdentity: [AgentProcessIdentity: AgentDetailCacheEntry],
+        existingIdentitiesByPID: [Int32: AgentProcessIdentity],
         processTable: ProcessTable
     ) -> [DetectedAgentSnapshot] {
         var results: [DetectedAgentSnapshot] = []
@@ -310,20 +492,30 @@ class AgentMonitor: ObservableObject {
                 seenTTYs.insert(tty)
 
                 let cmd = row.commandLine.isEmpty ? agent.binaryName : row.commandLine
-                let processWorkingDirectory = getWorkingDirectory(for: pid)
+                let detectedStartTime = Self.processStartTime(now: now, elapsedTime: elapsedTime)
+                let processIdentity = Self.stableProcessIdentity(
+                    pid: pid,
+                    detectedStartTime: detectedStartTime,
+                    existingIdentity: existingIdentitiesByPID[pid]
+                )
+                let details = cachedDetailsByIdentity[processIdentity]
+                let processWorkingDirectory = details?.processWorkingDirectory ?? "~"
                 results.append(
                     DetectedAgentSnapshot(
+                        processIdentity: processIdentity,
                         pid: pid,
                         kind: agent,
-                        startTime: now.addingTimeInterval(-elapsedTime),
+                        startTime: processIdentity.startTime,
                         processWorkingDirectory: processWorkingDirectory,
-                        workingDirectory: processWorkingDirectory,
+                        workingDirectory: details?.workingDirectory ?? processWorkingDirectory,
                         cmd: cmd,
                         tty: tty,
                         codexSessionIDHint: agent.binaryName == "codex"
                             ? Self.codexResumeSessionID(from: cmd)
                             : nil,
-                        codexSessionPath: cachedCodexSessionPathsByPID[pid] ?? nil
+                        codexSessionPath: details?.codexSessionPath,
+                        gitBranch: details?.gitBranch,
+                        gitRepoRoot: details?.gitRepoRoot
                     )
                 )
                 seenPIDs.insert(pid)
@@ -335,21 +527,23 @@ class AgentMonitor: ObservableObject {
     // MARK: - Reconcile
 
     private func reconcile(_ found: [DetectedAgentSnapshot], processTable: ProcessTable) {
-        let foundPIDs = Set(found.map { $0.pid })
-        let foundByPID = Dictionary(uniqueKeysWithValues: found.map { ($0.pid, $0) })
-        let deadPIDs = Set(agents.map { $0.pid }).subtracting(foundPIDs)
+        let foundIdentities = Set(found.map { $0.processIdentity })
+        let foundByIdentity = Dictionary(uniqueKeysWithValues: found.map { ($0.processIdentity, $0) })
+        let deadIdentities = Set(agents.map { $0.processIdentity }).subtracting(foundIdentities)
 
         // Remove dead agents
-        agents.removeAll { !foundPIDs.contains($0.pid) }
-        for pid in deadPIDs {
-            statusDecisionLogCache.removeValue(forKey: pid)
-            codexFallbackLogCache.removeValue(forKey: pid)
+        agents.removeAll { !foundIdentities.contains($0.processIdentity) }
+        for identity in deadIdentities {
+            statusDecisionLogCache.removeValue(forKey: identity)
+            codexFallbackLogCache.removeValue(forKey: identity)
+            detailCacheByIdentity.removeValue(forKey: identity)
         }
 
         // Add new agents
         for item in found {
-            if !knownPIDs.contains(item.pid) {
+            if !knownProcessIdentities.contains(item.processIdentity) {
                 let agent = DetectedAgent(
+                    processIdentity: item.processIdentity,
                     pid: item.pid,
                     kind: item.kind,
                     startTime: item.startTime,
@@ -363,25 +557,44 @@ class AgentMonitor: ObservableObject {
                 agent.gitRepoRoot = item.gitRepoRoot
                 agent.codexSessionPath = item.codexSessionPath
                 agents.append(agent)
-                knownPIDs.insert(item.pid)
+                knownProcessIdentities.insert(item.processIdentity)
             }
         }
 
         for agent in agents {
-            guard let item = foundByPID[agent.pid] else { continue }
-            if agent.codexSessionIDHint != item.codexSessionIDHint {
+            guard let item = foundByIdentity[agent.processIdentity] else { continue }
+            let codexSessionHintChanged = agent.codexSessionIDHint != item.codexSessionIDHint
+            if codexSessionHintChanged {
                 agent.codexSessionPath = nil
+                if let cachedDetails = detailCacheByIdentity[agent.processIdentity] {
+                    detailCacheByIdentity[agent.processIdentity] = AgentDetailCacheEntry(
+                        processWorkingDirectory: cachedDetails.processWorkingDirectory,
+                        workingDirectory: cachedDetails.workingDirectory,
+                        codexSessionPath: nil,
+                        gitBranch: cachedDetails.gitBranch,
+                        gitRepoRoot: cachedDetails.gitRepoRoot
+                    )
+                }
             }
-            if let codexSessionPath = item.codexSessionPath {
+            if !codexSessionHintChanged, let codexSessionPath = item.codexSessionPath {
                 agent.codexSessionPath = codexSessionPath
             }
-            agent.processWorkingDirectory = item.processWorkingDirectory
-            agent.workingDirectory = item.workingDirectory
+            if item.processWorkingDirectory != "~" || agent.processWorkingDirectory == "~" {
+                agent.processWorkingDirectory = item.processWorkingDirectory
+            }
+            if item.workingDirectory != "~" || agent.workingDirectory == "~" {
+                agent.workingDirectory = item.workingDirectory
+            }
             agent.commandLine = item.cmd
             agent.tty = item.tty
             agent.codexSessionIDHint = item.codexSessionIDHint
-            agent.gitBranch = item.gitBranch
-            agent.gitRepoRoot = item.gitRepoRoot
+            if item.workingDirectory != "~"
+                || item.gitBranch != nil
+                || item.gitRepoRoot != nil
+                || (agent.gitBranch == nil && agent.gitRepoRoot == nil) {
+                agent.gitBranch = item.gitBranch
+                agent.gitRepoRoot = item.gitRepoRoot
+            }
         }
 
         for agent in agents {
@@ -390,55 +603,11 @@ class AgentMonitor: ObservableObject {
 
         agents.sort(by: Self.menuSortsBefore)
 
-        // Clean up dead PIDs
-        knownPIDs = knownPIDs.intersection(foundPIDs)
+        // Clean up dead process identities
+        knownProcessIdentities = knownProcessIdentities.intersection(foundIdentities)
     }
 
     // MARK: - Git Context
-
-    private func resolveCodexWorkingDirectories(
-        for detections: [DetectedAgentSnapshot]
-    ) -> [DetectedAgentSnapshot] {
-        let sessionsRoot = NSHomeDirectory() + "/.codex/sessions"
-
-        return detections.map { detection in
-            guard detection.kind.binaryName == "codex" else { return detection }
-
-            var detection = detection
-            let lookup = codexSessionLookup(
-                for: CodexSessionLookupContext(
-                    startTime: detection.startTime,
-                    processWorkingDirectory: detection.processWorkingDirectory,
-                    sessionIDHint: detection.codexSessionIDHint,
-                    cachedSessionPath: detection.codexSessionPath
-                ),
-                in: sessionsRoot
-            )
-
-            if let sessionPath = lookup.path {
-                detection.codexSessionPath = sessionPath
-            }
-            if let metadata = lookup.metadata {
-                detection.workingDirectory = metadata.cwd
-            }
-
-            return detection
-        }
-    }
-
-    private func resolveGitContext(for detections: [DetectedAgentSnapshot]) -> [DetectedAgentSnapshot] {
-        detections.map { detection in
-            var detection = detection
-            if let gitContext = gitContext(for: detection.workingDirectory) {
-                detection.gitBranch = gitContext.branch
-                detection.gitRepoRoot = gitContext.repoRoot
-            } else {
-                detection.gitBranch = nil
-                detection.gitRepoRoot = nil
-            }
-            return detection
-        }
-    }
 
     private func gitContext(for workingDirectory: String) -> (branch: String?, repoRoot: String)? {
         let normalizedPath = normalizePath(workingDirectory)
@@ -641,6 +810,36 @@ class AgentMonitor: ObservableObject {
         }
     }
 
+    private static func processStartTime(now: Date, elapsedTime: TimeInterval) -> Date {
+        Date(timeIntervalSince1970: (now.timeIntervalSince1970 - elapsedTime).rounded())
+    }
+
+    private static func fileSize(from attrs: [FileAttributeKey: Any]) -> UInt64? {
+        if let size = attrs[.size] as? UInt64 {
+            return size
+        }
+        if let size = attrs[.size] as? NSNumber {
+            return size.uint64Value
+        }
+        if let size = attrs[.size] as? Int {
+            return UInt64(size)
+        }
+        return nil
+    }
+
+    private static func stableProcessIdentity(
+        pid: Int32,
+        detectedStartTime: Date,
+        existingIdentity: AgentProcessIdentity?
+    ) -> AgentProcessIdentity {
+        if let existingIdentity,
+           abs(existingIdentity.startTime.timeIntervalSince(detectedStartTime)) <= 2 {
+            return existingIdentity
+        }
+
+        return AgentProcessIdentity(pid: pid, startTime: detectedStartTime)
+    }
+
     private static func codexResumeSessionID(from commandLine: String) -> String? {
         let parts = commandLine.split(separator: " ")
         guard let resumeIndex = parts.firstIndex(where: { $0 == "resume" }) else { return nil }
@@ -825,19 +1024,19 @@ class AgentMonitor: ObservableObject {
         let projectDir = NSHomeDirectory() + "/.claude/projects/" + projectDirName
 
         // Find the most recently modified .jsonl file
-        guard let jsonlPath = mostRecentFile(in: projectDir, extension: "jsonl") else { return nil }
+        guard let transcript = mostRecentFile(in: projectDir, extension: "jsonl") else { return nil }
 
-        // Check file modification time
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
-              let mtime = attrs[.modificationDate] as? Date else { return nil }
-
-        let staleness = Date().timeIntervalSince(mtime)
+        let staleness = Date().timeIntervalSince(transcript.modifiedAt)
         let isActive = treeCPU > 3.0
-        let transcriptName = URL(fileURLWithPath: jsonlPath).lastPathComponent
+        let transcriptName = URL(fileURLWithPath: transcript.path).lastPathComponent
 
         // Read recent lines and find the last assistant/user entry
         // (skip system/progress metadata lines that Claude appends after turns)
-        guard let entry = readLastRelevantEntry(of: jsonlPath) else {
+        guard let entry = cachedLastRelevantClaudeEntry(
+            of: transcript.path,
+            fileSize: transcript.fileSize,
+            modifiedAt: transcript.modifiedAt
+        ) else {
             return nil
         }
 
@@ -939,57 +1138,69 @@ class AgentMonitor: ObservableObject {
     }
 
     /// Find the most recently modified file with the given extension in a directory
-    private func mostRecentFile(in directory: String, extension ext: String) -> String? {
+    private func mostRecentFile(in directory: String, extension ext: String) -> RecentFileInfo? {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: directory) else { return nil }
 
-        var bestPath: String?
-        var bestDate: Date?
+        var best: RecentFileInfo?
 
         for file in files where file.hasSuffix(".\(ext)") {
             let path = directory + "/" + file
             if let attrs = try? fm.attributesOfItem(atPath: path),
-               let mtime = attrs[.modificationDate] as? Date {
-                if bestDate == nil || mtime > bestDate! {
-                    bestDate = mtime
-                    bestPath = path
+               let modifiedAt = attrs[.modificationDate] as? Date,
+               let fileSize = Self.fileSize(from: attrs) {
+                if best == nil || modifiedAt > best!.modifiedAt {
+                    best = RecentFileInfo(path: path, modifiedAt: modifiedAt, fileSize: fileSize)
                 }
             }
         }
-        return bestPath
+        return best
     }
 
     // MARK: - Codex Session-Based Status
 
     private func codexStatusFromSession(_ agent: DetectedAgent) -> StatusDecision? {
-        let sessionsRoot = NSHomeDirectory() + "/.codex/sessions"
-        let sessionLookup = codexSessionLookup(
-            for: CodexSessionLookupContext(
-                startTime: agent.startTime,
-                processWorkingDirectory: agent.processWorkingDirectory,
-                sessionIDHint: agent.codexSessionIDHint,
-                cachedSessionPath: agent.codexSessionPath
-            ),
-            in: sessionsRoot
-        )
-        guard let sessionPath = sessionLookup.path else {
-            logCodexFallbackIfNeeded(for: agent, reason: sessionLookup.debug)
+        guard let sessionPath = agent.codexSessionPath,
+              FileManager.default.fileExists(atPath: sessionPath) else {
+            logCodexFallbackIfNeeded(for: agent, reason: "status=no_cached_session")
             return nil
         }
 
-        agent.codexSessionPath = sessionPath
-        if let metadata = sessionLookup.metadata {
-            agent.workingDirectory = metadata.cwd
-        }
-
-        let statusProbe = codexStatus(fromSessionFile: sessionPath)
+        let statusProbe = cachedCodexStatus(fromSessionFile: sessionPath)
         guard let decision = statusProbe.decision else {
             logCodexFallbackIfNeeded(for: agent, reason: statusProbe.debug)
             return nil
         }
 
-        codexFallbackLogCache.removeValue(forKey: agent.pid)
+        codexFallbackLogCache.removeValue(forKey: agent.processIdentity)
         return decision
+    }
+
+    private func cachedCodexStatus(fromSessionFile path: String) -> CodexStatusProbe {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let fileSize = Self.fileSize(from: attrs) else {
+            let probe = CodexStatusProbe(
+                decision: nil,
+                debug: "status=file_unreadable session=\(URL(fileURLWithPath: path).lastPathComponent)"
+            )
+            codexStatusCache.removeValue(forKey: path)
+            return probe
+        }
+
+        let modifiedAt = attrs[.modificationDate] as? Date
+        if let cached = codexStatusCache[path],
+           cached.fileSize == fileSize,
+           cached.modifiedAt == modifiedAt {
+            return cached.probe
+        }
+
+        let probe = codexStatus(fromSessionFile: path, fileSize: fileSize)
+        codexStatusCache[path] = CodexStatusCacheEntry(
+            fileSize: fileSize,
+            modifiedAt: modifiedAt,
+            probe: probe
+        )
+        return probe
     }
 
     private func codexSessionLookup(
@@ -1297,16 +1508,23 @@ class AgentMonitor: ObservableObject {
     }
 
     private func codexStatus(
-        fromSessionFile path: String
-    ) -> (decision: StatusDecision?, debug: String) {
+        fromSessionFile path: String,
+        fileSize knownFileSize: UInt64? = nil
+    ) -> CodexStatusProbe {
         guard let handle = FileHandle(forReadingAtPath: path) else {
-            return (nil, "status=file_unreadable session=\(URL(fileURLWithPath: path).lastPathComponent)")
+            return CodexStatusProbe(
+                decision: nil,
+                debug: "status=file_unreadable session=\(URL(fileURLWithPath: path).lastPathComponent)"
+            )
         }
         defer { handle.closeFile() }
 
-        let fileSize = handle.seekToEndOfFile()
+        let fileSize = knownFileSize ?? handle.seekToEndOfFile()
         guard fileSize > 0 else {
-            return (nil, "status=empty_file session=\(URL(fileURLWithPath: path).lastPathComponent)")
+            return CodexStatusProbe(
+                decision: nil,
+                debug: "status=empty_file session=\(URL(fileURLWithPath: path).lastPathComponent)"
+            )
         }
 
         // Codex can append very large response payloads after the last status event.
@@ -1316,7 +1534,10 @@ class AgentMonitor: ObservableObject {
         let data = handle.readDataToEndOfFile()
 
         guard let content = String(data: data, encoding: .utf8) else {
-            return (nil, "status=tail_invalid_utf8 session=\(URL(fileURLWithPath: path).lastPathComponent) read_size=\(readSize)")
+            return CodexStatusProbe(
+                decision: nil,
+                debug: "status=tail_invalid_utf8 session=\(URL(fileURLWithPath: path).lastPathComponent) read_size=\(readSize)"
+            )
         }
 
         let lines = content
@@ -1343,26 +1564,26 @@ class AgentMonitor: ObservableObject {
 
             switch eventType {
             case "task_started":
-                return (
-                    StatusDecision(
+                return CodexStatusProbe(
+                    decision: StatusDecision(
                         status: .thinking,
                         activity: "Working...",
                         source: "codex_session",
                         details: "event=task_started session=\(URL(fileURLWithPath: path).lastPathComponent) timestamp=\(json["timestamp"] as? String ?? "-")",
                         refreshLastActivity: true
                     ),
-                    "status=task_started session=\(URL(fileURLWithPath: path).lastPathComponent)"
+                    debug: "status=task_started session=\(URL(fileURLWithPath: path).lastPathComponent)"
                 )
             case "task_complete", "turn_aborted":
-                return (
-                    StatusDecision(
+                return CodexStatusProbe(
+                    decision: StatusDecision(
                         status: .idle,
                         activity: "Ready",
                         source: "codex_session",
                         details: "event=\(eventType) session=\(URL(fileURLWithPath: path).lastPathComponent) timestamp=\(json["timestamp"] as? String ?? "-")",
                         refreshLastActivity: false
                     ),
-                    "status=\(eventType) session=\(URL(fileURLWithPath: path).lastPathComponent)"
+                    debug: "status=\(eventType) session=\(URL(fileURLWithPath: path).lastPathComponent)"
                 )
             default:
                 continue
@@ -1370,9 +1591,9 @@ class AgentMonitor: ObservableObject {
         }
 
         let recentEvents = recentEventTypes.isEmpty ? "-" : recentEventTypes.joined(separator: ",")
-        return (
-            nil,
-            "status=no_task_event session=\(URL(fileURLWithPath: path).lastPathComponent) event_msgs=\(eventMsgCount) recent_events=\(recentEvents) read_size=\(readSize)"
+        return CodexStatusProbe(
+            decision: nil,
+            debug: "status=no_task_event session=\(URL(fileURLWithPath: path).lastPathComponent) event_msgs=\(eventMsgCount) recent_events=\(recentEvents) read_size=\(readSize)"
         )
     }
 
@@ -1390,7 +1611,7 @@ class AgentMonitor: ObservableObject {
             agent.lastActivity = Date()
         }
         if decision.source == "codex_session" {
-            codexFallbackLogCache.removeValue(forKey: agent.pid)
+            codexFallbackLogCache.removeValue(forKey: agent.processIdentity)
         }
         logStatusDecisionIfNeeded(decision, for: agent, procState: procState, treeCPU: treeCPU)
     }
@@ -1410,8 +1631,8 @@ class AgentMonitor: ObservableObject {
             String(format: "%.1f", treeCPU)
         ].joined(separator: "|")
 
-        guard statusDecisionLogCache[agent.pid] != fingerprint else { return }
-        statusDecisionLogCache[agent.pid] = fingerprint
+        guard statusDecisionLogCache[agent.processIdentity] != fingerprint else { return }
+        statusDecisionLogCache[agent.processIdentity] = fingerprint
 
         let logLine = [
             Self.iso8601Timestamp.string(from: Date()),
@@ -1456,8 +1677,8 @@ class AgentMonitor: ObservableObject {
             reason
         ].joined(separator: "|")
 
-        guard codexFallbackLogCache[agent.pid] != fingerprint else { return }
-        codexFallbackLogCache[agent.pid] = fingerprint
+        guard codexFallbackLogCache[agent.processIdentity] != fingerprint else { return }
+        codexFallbackLogCache[agent.processIdentity] = fingerprint
 
         let logLine = [
             Self.iso8601Timestamp.string(from: Date()),
@@ -1530,6 +1751,26 @@ class AgentMonitor: ObservableObject {
         let data = handle.readData(ofLength: 65536)
         guard let content = String(data: data, encoding: .utf8) else { return nil }
         return content.components(separatedBy: "\n").first
+    }
+
+    private func cachedLastRelevantClaudeEntry(
+        of path: String,
+        fileSize: UInt64,
+        modifiedAt: Date
+    ) -> [String: Any]? {
+        if let cached = claudeTranscriptEntryCache[path],
+           cached.fileSize == fileSize,
+           cached.modifiedAt == modifiedAt {
+            return cached.entry
+        }
+
+        let entry = readLastRelevantEntry(of: path)
+        claudeTranscriptEntryCache[path] = ClaudeTranscriptEntryCacheEntry(
+            fileSize: fileSize,
+            modifiedAt: modifiedAt,
+            entry: entry
+        )
+        return entry
     }
 
     /// Read the last assistant or user entry from a JSONL file.
@@ -1777,14 +2018,14 @@ class AgentMonitor: ObservableObject {
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
 
-    private func getWorkingDirectory(for pid: Int32) -> String {
+    private func getWorkingDirectory(for pid: Int32) -> String? {
         let output = shell("lsof -p \(pid) -a -d cwd -Fn 2>/dev/null")
         for line in output.components(separatedBy: "\n") {
             if line.hasPrefix("n") {
                 return String(line.dropFirst())
             }
         }
-        return "~"
+        return nil
     }
 
     @discardableResult
