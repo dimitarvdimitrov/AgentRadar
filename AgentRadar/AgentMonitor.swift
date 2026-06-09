@@ -22,7 +22,7 @@ struct PendingToolCall {
 // MARK: - Known Agent Binary
 
 struct KnownAgent {
-    let binaryName: String       // exact name for pgrep -x
+    let binaryName: String       // exact process name
     let displayName: String
     let icon: String             // SF Symbol
     let customIcon: String?      // Custom asset name
@@ -94,6 +94,11 @@ private struct RecentFileInfo {
     let path: String
     let modifiedAt: Date
     let fileSize: UInt64
+}
+
+private struct AgentCommandLineMatchCacheEntry {
+    let commandLine: String
+    let agentNames: Set<String>
 }
 
 private struct GitRepoCacheEntry {
@@ -263,6 +268,7 @@ class AgentMonitor: ObservableObject {
     private var codexSessionMetadataFailureCache: [String: String] = [:]
     private var codexStatusCache: [String: CodexStatusCacheEntry] = [:]
     private var claudeTranscriptEntryCache: [String: ClaudeTranscriptEntryCacheEntry] = [:]
+    private var commandLineAgentMatchCacheByPID: [Int32: AgentCommandLineMatchCacheEntry] = [:]
     private var statusDecisionLogCache: [AgentProcessIdentity: String] = [:]
     private var codexFallbackLogCache: [AgentProcessIdentity: String] = [:]
     private let nonGitCacheTTL: TimeInterval = 10
@@ -340,9 +346,11 @@ class AgentMonitor: ObservableObject {
         let existingIdentitiesByPID = Dictionary(
             uniqueKeysWithValues: agents.map { ($0.pid, $0.processIdentity) }
         )
+        let commandLineAgentMatchCacheByPID = self.commandLineAgentMatchCacheByPID
 
         DispatchQueue.global(qos: .background).async { [weak self] in
             guard let self = self else { return }
+            var updatedCommandLineAgentMatchCacheByPID = commandLineAgentMatchCacheByPID
             let processTable = ProcessInspector.snapshot()
             guard processTable.isValid else {
                 DispatchQueue.main.async {
@@ -358,7 +366,8 @@ class AgentMonitor: ObservableObject {
             let found = self.detectAgents(
                 cachedDetailsByIdentity: cachedDetailsByIdentity,
                 existingIdentitiesByPID: existingIdentitiesByPID,
-                processTable: processTable
+                processTable: processTable,
+                commandLineAgentMatchCacheByPID: &updatedCommandLineAgentMatchCacheByPID
             )
 
             DispatchQueue.main.async {
@@ -370,6 +379,7 @@ class AgentMonitor: ObservableObject {
                     }
                 }
 
+                self.commandLineAgentMatchCacheByPID = updatedCommandLineAgentMatchCacheByPID
                 self.reconcile(found, processTable: processTable)
                 self.lastScan = Date()
                 self.onUpdate?(self.agents)
@@ -448,40 +458,62 @@ class AgentMonitor: ObservableObject {
         onUpdate?(agents)
     }
 
-    // MARK: - Layer 1: Detect agents via pgrep
+    // MARK: - Layer 1: Detect agents via process snapshot
 
     private func detectAgents(
         cachedDetailsByIdentity: [AgentProcessIdentity: AgentDetailCacheEntry],
         existingIdentitiesByPID: [Int32: AgentProcessIdentity],
-        processTable: ProcessTable
+        processTable: ProcessTable,
+        commandLineAgentMatchCacheByPID: inout [Int32: AgentCommandLineMatchCacheEntry]
     ) -> [DetectedAgentSnapshot] {
         var results: [DetectedAgentSnapshot] = []
         let myPID = ProcessInfo.processInfo.processIdentifier
         let now = Date()
         var seenPIDs = Set<Int32>()
+        let allAgentNames = Set(KnownAgent.all.map(\.binaryName))
+        let agentNamesNeedingFallback = Set(
+            KnownAgent.all
+                .filter { processTable.rows(named: $0.binaryName).isEmpty }
+                .map(\.binaryName)
+        )
+        var fallbackRowsByAgent: [String: [ProcessSnapshot]] = [:]
+
+        if !agentNamesNeedingFallback.isEmpty {
+            for row in processTable.byPID.values where Self.canHostAgentBinFallback(processName: row.processName) {
+                let matchingAgentNames = Self.cachedAgentCommandLineMatches(
+                    for: row,
+                    allAgentNames: allAgentNames,
+                    cache: &commandLineAgentMatchCacheByPID
+                )
+
+                for agentName in matchingAgentNames where agentNamesNeedingFallback.contains(agentName) {
+                    fallbackRowsByAgent[agentName, default: []].append(row)
+                }
+            }
+        }
+
+        let livePIDs = Set(processTable.byPID.keys)
+        commandLineAgentMatchCacheByPID = commandLineAgentMatchCacheByPID.filter { pid, entry in
+            guard livePIDs.contains(pid), let row = processTable.row(for: pid) else { return false }
+            return row.commandLine == entry.commandLine
+        }
 
         for agent in KnownAgent.all {
-            // Try exact binary match first (compiled CLIs like claude),
-            // then fall back to command-line match (Node/Python CLIs like gemini, codex)
-            var pgrepOutput = shell("pgrep -x \(agent.binaryName) 2>/dev/null")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if pgrepOutput.isEmpty {
-                pgrepOutput = shell("pgrep -f 'bin/\(agent.binaryName)($| )' 2>/dev/null")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            guard !pgrepOutput.isEmpty else { continue }
-
-            let pids = pgrepOutput.components(separatedBy: "\n")
-                .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-                .sorted()  // Lowest PID first (parent process)
+            // Match pgrep's process-name default first, then use the full
+            // command-line fallback only for wrapper processes such as node.
+            let exactRows = processTable.rows(named: agent.binaryName)
+            let matchedRows = exactRows.isEmpty
+                ? fallbackRowsByAgent[agent.binaryName] ?? []
+                : exactRows
+            let rows = matchedRows.sorted { $0.pid < $1.pid }  // Lowest PID first (parent process)
+            guard !rows.isEmpty else { continue }
 
             // Track TTYs to avoid adding child workers on the same terminal
             var seenTTYs = Set<String>()
 
-            for pid in pids {
+            for row in rows {
+                let pid = row.pid
                 if pid == myPID || seenPIDs.contains(pid) { continue }
-
-                guard let row = processTable.row(for: pid) else { continue }
 
                 let elapsedTime = Self.elapsedTime(from: row.elapsedTime)
                 let tty = row.tty
@@ -838,6 +870,60 @@ class AgentMonitor: ObservableObject {
         }
 
         return AgentProcessIdentity(pid: pid, startTime: detectedStartTime)
+    }
+
+    private static func canHostAgentBinFallback(processName: String) -> Bool {
+        switch processName {
+        case "node", "python", "python3", "bun", "deno", "ruby",
+             "bash", "zsh", "sh", "env", "npx", "npm", "pnpm", "yarn":
+            return true
+        default:
+            return processName.hasPrefix("python")
+        }
+    }
+
+    private static func cachedAgentCommandLineMatches(
+        for row: ProcessSnapshot,
+        allAgentNames: Set<String>,
+        cache: inout [Int32: AgentCommandLineMatchCacheEntry]
+    ) -> Set<String> {
+        if let entry = cache[row.pid],
+           entry.commandLine == row.commandLine {
+            return entry.agentNames
+        }
+
+        let agentNames = agentBinFallbackNames(in: row.commandLine, matching: allAgentNames)
+        cache[row.pid] = AgentCommandLineMatchCacheEntry(
+            commandLine: row.commandLine,
+            agentNames: agentNames
+        )
+        return agentNames
+    }
+
+    private static func agentBinFallbackNames(in commandLine: String, matching agentNames: Set<String>) -> Set<String> {
+        let needle = "bin/"
+        var names = Set<String>()
+        var searchRange = commandLine.startIndex..<commandLine.endIndex
+
+        while let range = commandLine.range(of: needle, range: searchRange) {
+            let nameStart = range.upperBound
+            var nameEnd = nameStart
+
+            while nameEnd < commandLine.endIndex, !commandLine[nameEnd].isWhitespace {
+                nameEnd = commandLine.index(after: nameEnd)
+            }
+
+            if nameStart < nameEnd {
+                let name = String(commandLine[nameStart..<nameEnd])
+                if agentNames.contains(name) {
+                    names.insert(name)
+                }
+            }
+
+            searchRange = nameEnd..<commandLine.endIndex
+        }
+
+        return names
     }
 
     private static func codexResumeSessionID(from commandLine: String) -> String? {

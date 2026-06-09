@@ -3,6 +3,7 @@ import Foundation
 struct ProcessSnapshot {
     let pid: Int32
     let ppid: Int32
+    let processName: String
     let cpuPercent: Double
     let rssKB: Int
     let stat: String
@@ -13,11 +14,13 @@ struct ProcessSnapshot {
 
 struct ProcessTable {
     let byPID: [Int32: ProcessSnapshot]
+    let byProcessName: [String: [ProcessSnapshot]]
     let childrenByPPID: [Int32: [ProcessSnapshot]]
     let isValid: Bool
 
     init(snapshots: [ProcessSnapshot], isValid: Bool = true) {
         self.byPID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.pid, $0) })
+        self.byProcessName = Dictionary(grouping: snapshots, by: \.processName)
         self.childrenByPPID = Dictionary(grouping: snapshots, by: \.ppid)
         self.isValid = isValid
     }
@@ -28,6 +31,10 @@ struct ProcessTable {
 
     func children(of pid: Int32) -> [ProcessSnapshot] {
         childrenByPPID[pid] ?? []
+    }
+
+    func rows(named processName: String) -> [ProcessSnapshot] {
+        byProcessName[processName] ?? []
     }
 
     func descendants(of pid: Int32) -> [ProcessSnapshot] {
@@ -70,12 +77,19 @@ struct ProcessTable {
 }
 
 enum ProcessInspector {
+    private static let processNameColumnWidth = 20
+
     static func snapshot() -> ProcessTable {
         let task = Process()
         let outputPipe = Pipe()
+        let processNameHeader = String(repeating: "U", count: processNameColumnWidth)
 
         task.executableURL = URL(fileURLWithPath: "/bin/ps")
-        task.arguments = ["axww", "-o", "pid=,ppid=,pcpu=,rss=,stat=,etime=,tty=,command="]
+        task.arguments = [
+            "axww",
+            "-o",
+            "pid=,ppid=,pcpu=,rss=,stat=,etime=,tty=,ucomm=\(processNameHeader),command="
+        ]
         task.standardOutput = outputPipe
         task.standardError = FileHandle.nullDevice
 
@@ -138,11 +152,29 @@ enum ProcessInspector {
             index = line.index(after: index)
         }
 
+        guard index < line.endIndex else { return nil }
+        let processNameStart = index
+        var processNameEnd = index
+        var remainingProcessNameColumns = processNameColumnWidth
+        while processNameEnd < line.endIndex, remainingProcessNameColumns > 0 {
+            processNameEnd = line.index(after: processNameEnd)
+            remainingProcessNameColumns -= 1
+        }
+
+        let processName = String(line[processNameStart..<processNameEnd])
+            .trimmingCharacters(in: .whitespaces)
+
+        index = processNameEnd
+        while index < line.endIndex, line[index].isWhitespace {
+            index = line.index(after: index)
+        }
+
         let commandLine = index < line.endIndex ? String(line[index...]) : ""
 
         return ProcessSnapshot(
             pid: pid,
             ppid: ppid,
+            processName: processName,
             cpuPercent: cpuPercent,
             rssKB: rssKB,
             stat: String(fields[4]),
