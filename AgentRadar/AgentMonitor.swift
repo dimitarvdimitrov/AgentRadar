@@ -541,7 +541,7 @@ class AgentMonitor: ObservableObject {
         var fallbackRowsByAgent: [String: [ProcessSnapshot]] = [:]
 
         if !agentNamesNeedingFallback.isEmpty {
-            for row in processTable.byPID.values where Self.canHostAgentBinFallback(processName: row.processName) {
+            for row in processTable.byPID.values where Self.canHostAgentBinFallback(row: row, agentNames: allAgentNames) {
                 let matchingAgentNames = Self.cachedAgentCommandLineMatches(
                     for: row,
                     allAgentNames: allAgentNames,
@@ -937,14 +937,27 @@ class AgentMonitor: ObservableObject {
         return AgentProcessIdentity(pid: pid, startTime: detectedStartTime)
     }
 
-    private static func canHostAgentBinFallback(processName: String) -> Bool {
-        switch processName {
+    private static func canHostAgentBinFallback(row: ProcessSnapshot, agentNames: Set<String>) -> Bool {
+        switch row.processName {
         case "node", "python", "python3", "bun", "deno", "ruby",
              "bash", "zsh", "sh", "env", "npx", "npm", "pnpm", "yarn":
             return true
         default:
-            return processName.hasPrefix("python")
+            if row.processName.hasPrefix("python") {
+                return true
+            }
+            // Claude Code reports its version string (e.g. "2.1.170") as the
+            // process name, so also accept rows launched as an agent binary.
+            return agentNames.contains(firstCommandTokenBasename(row.commandLine))
         }
+    }
+
+    private static func firstCommandTokenBasename(_ commandLine: String) -> String {
+        let token = commandLine.prefix { !$0.isWhitespace }
+        if let slashIndex = token.lastIndex(of: "/") {
+            return String(token[token.index(after: slashIndex)...])
+        }
+        return String(token)
     }
 
     private static func cachedAgentCommandLineMatches(
@@ -969,6 +982,11 @@ class AgentMonitor: ObservableObject {
         let needle = "bin/"
         var names = Set<String>()
         var searchRange = commandLine.startIndex..<commandLine.endIndex
+
+        let firstToken = firstCommandTokenBasename(commandLine)
+        if agentNames.contains(firstToken) {
+            names.insert(firstToken)
+        }
 
         while let range = commandLine.range(of: needle, range: searchRange) {
             let nameStart = range.upperBound
