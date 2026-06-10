@@ -329,6 +329,8 @@ class AgentMonitor: ObservableObject {
     private var gitRepoCache: [String: GitRepoCacheEntry] = [:]
     private var gitLookupCache: [String: GitLookupCacheEntry] = [:]
     private var codexSessionPathCache: [String: String] = [:]
+    private var claudeSessionPathCache: [String: String] = [:]
+    private var claudePinnedTranscriptByIdentity: [AgentProcessIdentity: String] = [:]
     private var codexSessionMetadataCache: [String: CodexSessionMetadata] = [:]
     private var codexSessionMetadataFailureCache: [String: String] = [:]
     private var codexStatusCache: [String: CodexStatusCacheEntry] = [:]
@@ -700,6 +702,7 @@ class AgentMonitor: ObservableObject {
             codexFallbackLogCache.removeValue(forKey: identity)
             detailCacheByIdentity.removeValue(forKey: identity)
             hydrationBackoffByIdentity.removeValue(forKey: identity)
+            claudePinnedTranscriptByIdentity.removeValue(forKey: identity)
         }
 
         // Add new agents
@@ -1262,8 +1265,20 @@ class AgentMonitor: ObservableObject {
         let projectDirName = agent.workingDirectory.replacingOccurrences(of: "/", with: "-")
         let projectDir = NSHomeDirectory() + "/.claude/projects/" + projectDirName
 
-        // Find the most recently modified .jsonl file
-        guard let transcript = mostRecentFile(in: projectDir, extension: "jsonl") else { return nil }
+        // A session resumed with an explicit id (`claude --resume <uuid>`) keeps
+        // writing to the project dir where it was originally created, which can
+        // differ from the process cwd — resolve the id across all project dirs.
+        // Otherwise, match a transcript to this process by creation time.
+        let transcript: RecentFileInfo
+        if let sessionID = Self.claudeSessionID(fromCommandLine: agent.commandLine),
+           let pinned = claudeTranscript(forSessionID: sessionID, preferredProjectDir: projectDir) {
+            claudePinnedTranscriptByIdentity[agent.processIdentity] = pinned.path
+            transcript = pinned
+        } else if let matched = claudeMatchedTranscript(in: projectDir, for: agent) {
+            transcript = matched
+        } else {
+            return nil
+        }
 
         let staleness = Date().timeIntervalSince(transcript.modifiedAt)
         let isActive = treeCPU > 3.0
@@ -1376,24 +1391,131 @@ class AgentMonitor: ObservableObject {
         }
     }
 
-    /// Find the most recently modified file with the given extension in a directory
-    private func mostRecentFile(in directory: String, extension ext: String) -> RecentFileInfo? {
+    /// Session id explicitly pinned on the claude command line via
+    /// `--resume <uuid>`, `-r <uuid>`, or `--session-id <uuid>`.
+    /// Returns nil for the bare `--resume` picker form.
+    private static func claudeSessionID(fromCommandLine commandLine: String) -> String? {
+        let parts = commandLine.split(separator: " ")
+
+        for (index, part) in parts.enumerated() {
+            var candidate: Substring?
+
+            if part == "--resume" || part == "-r" || part == "--session-id" {
+                if index + 1 < parts.count {
+                    candidate = parts[index + 1]
+                }
+            } else if let equalsIndex = part.firstIndex(of: "="),
+                      part[..<equalsIndex] == "--resume" || part[..<equalsIndex] == "--session-id" {
+                candidate = part[part.index(after: equalsIndex)...]
+            }
+
+            guard let candidate else { continue }
+            let value = String(candidate).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if UUID(uuidString: value) != nil {
+                return value.lowercased()
+            }
+        }
+
+        return nil
+    }
+
+    /// Locate the transcript for a specific session id, checking the cwd-derived
+    /// project dir first and then every other project dir. Found paths are cached.
+    private func claudeTranscript(forSessionID sessionID: String, preferredProjectDir: String) -> RecentFileInfo? {
+        if let cached = claudeSessionPathCache[sessionID], let info = fileInfo(atPath: cached) {
+            return info
+        }
+
+        let fileName = sessionID + ".jsonl"
+        let preferredPath = preferredProjectDir + "/" + fileName
+        if let info = fileInfo(atPath: preferredPath) {
+            claudeSessionPathCache[sessionID] = preferredPath
+            return info
+        }
+
+        let projectsRoot = NSHomeDirectory() + "/.claude/projects"
+        guard let projectDirs = try? FileManager.default.contentsOfDirectory(atPath: projectsRoot) else {
+            return nil
+        }
+        for dir in projectDirs {
+            let path = projectsRoot + "/" + dir + "/" + fileName
+            if let info = fileInfo(atPath: path) {
+                claudeSessionPathCache[sessionID] = path
+                return info
+            }
+        }
+        return nil
+    }
+
+    /// Covers etime rounding when comparing a transcript's creation time
+    /// against the process start time derived from it.
+    private static let claudeTranscriptCreationSlack: TimeInterval = 120
+
+    /// Pick the transcript belonging to this process when no session id is
+    /// pinned on the command line. A transcript created while this process was
+    /// running belongs to the newest claude process (same cwd) that was already
+    /// running at creation time — this covers fresh sessions and /clear, which
+    /// starts a new transcript file mid-process. Transcripts that predate every
+    /// live claude process in the dir are resume targets: a bare `--resume`
+    /// session appends to one of those, so fall back to the newest of them.
+    private func claudeMatchedTranscript(in projectDir: String, for agent: DetectedAgent) -> RecentFileInfo? {
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: directory) else { return nil }
+        guard let files = try? fm.contentsOfDirectory(atPath: projectDir) else { return nil }
 
-        var best: RecentFileInfo?
+        let pinnedByOthers = Set(
+            claudePinnedTranscriptByIdentity
+                .filter { $0.key != agent.processIdentity }
+                .map(\.value)
+        )
+        let peerStartTimes = agents
+            .filter {
+                $0.kind.binaryName == "claude"
+                    && $0.processIdentity != agent.processIdentity
+                    && $0.workingDirectory == agent.workingDirectory
+            }
+            .map(\.startTime)
 
-        for file in files where file.hasSuffix(".\(ext)") {
-            let path = directory + "/" + file
-            if let attrs = try? fm.attributesOfItem(atPath: path),
-               let modifiedAt = attrs[.modificationDate] as? Date,
-               let fileSize = Self.fileSize(from: attrs) {
-                if best == nil || modifiedAt > best!.modifiedAt {
-                    best = RecentFileInfo(path: path, modifiedAt: modifiedAt, fileSize: fileSize)
+        var bestOwned: RecentFileInfo?
+        var bestResumable: RecentFileInfo?
+
+        for file in files where file.hasSuffix(".jsonl") {
+            let path = projectDir + "/" + file
+            guard !pinnedByOthers.contains(path),
+                  let attrs = try? fm.attributesOfItem(atPath: path),
+                  let modifiedAt = attrs[.modificationDate] as? Date,
+                  let fileSize = Self.fileSize(from: attrs) else {
+                continue
+            }
+            let createdAt = (attrs[.creationDate] as? Date) ?? modifiedAt
+            let creationCutoff = createdAt.addingTimeInterval(Self.claudeTranscriptCreationSlack)
+            let info = RecentFileInfo(path: path, modifiedAt: modifiedAt, fileSize: fileSize)
+
+            if agent.startTime <= creationCutoff {
+                // Created during this process's lifetime — ours unless a peer
+                // that started later was also running at creation time.
+                let newerPeerOwnsIt = peerStartTimes.contains {
+                    $0 > agent.startTime && $0 <= creationCutoff
+                }
+                if !newerPeerOwnsIt, bestOwned == nil || modifiedAt > bestOwned!.modifiedAt {
+                    bestOwned = info
+                }
+            } else if !peerStartTimes.contains(where: { $0 <= creationCutoff }) {
+                if bestResumable == nil || modifiedAt > bestResumable!.modifiedAt {
+                    bestResumable = info
                 }
             }
         }
-        return best
+
+        return bestOwned ?? bestResumable
+    }
+
+    private func fileInfo(atPath path: String) -> RecentFileInfo? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let modifiedAt = attrs[.modificationDate] as? Date,
+              let fileSize = Self.fileSize(from: attrs) else {
+            return nil
+        }
+        return RecentFileInfo(path: path, modifiedAt: modifiedAt, fileSize: fileSize)
     }
 
     // MARK: - Codex Session-Based Status
