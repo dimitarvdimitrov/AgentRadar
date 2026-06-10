@@ -121,6 +121,11 @@ private struct AgentDetailHydrationTarget {
     let codexSessionPath: String?
 }
 
+private struct HydrationBackoff {
+    let attempts: Int
+    let nextAttemptAt: Date
+}
+
 private struct AgentDetailHydrationResult {
     let processIdentity: AgentProcessIdentity
     let processWorkingDirectory: String
@@ -319,6 +324,7 @@ class AgentMonitor: ObservableObject {
     private var detailRefreshRequestedWhileRunning = false
     private var knownProcessIdentities: Set<AgentProcessIdentity> = []
     private var detailCacheByIdentity: [AgentProcessIdentity: AgentDetailCacheEntry] = [:]
+    private var hydrationBackoffByIdentity: [AgentProcessIdentity: HydrationBackoff] = [:]
     private let detailRefreshQueue = DispatchQueue(label: "AgentRadar.AgentMonitor.detailRefresh", qos: .utility)
     private var gitRepoCache: [String: GitRepoCacheEntry] = [:]
     private var gitLookupCache: [String: GitLookupCacheEntry] = [:]
@@ -372,6 +378,35 @@ class AgentMonitor: ObservableObject {
             return
         }
 
+        scheduleDetailHydration(for: agents)
+    }
+
+    /// Hydrate agents that don't have full details yet (fresh detections, or
+    /// agents recreated after a cache loss). Retries with backoff so agents
+    /// whose details can never resolve don't burn CPU on every scan.
+    private func hydrateUndetailedAgents() {
+        guard !isDetailRefreshInFlight else { return }
+
+        let now = Date()
+        let pending = agents.filter { agent in
+            guard !Self.isFullyHydrated(agent) else { return false }
+            guard let backoff = hydrationBackoffByIdentity[agent.processIdentity] else { return true }
+            return backoff.nextAttemptAt <= now
+        }
+        guard !pending.isEmpty else { return }
+
+        for agent in pending {
+            let attempts = (hydrationBackoffByIdentity[agent.processIdentity]?.attempts ?? 0) + 1
+            hydrationBackoffByIdentity[agent.processIdentity] = HydrationBackoff(
+                attempts: attempts,
+                nextAttemptAt: now.addingTimeInterval(Self.hydrationRetryDelay(afterAttempts: attempts))
+            )
+        }
+
+        scheduleDetailHydration(for: pending)
+    }
+
+    private func scheduleDetailHydration(for agents: [DetectedAgent]) {
         let targets = agents.map {
             AgentDetailHydrationTarget(
                 processIdentity: $0.processIdentity,
@@ -406,6 +441,22 @@ class AgentMonitor: ObservableObject {
                 self.applyHydratedDetails(results)
             }
         }
+    }
+
+    private static func isFullyHydrated(_ agent: DetectedAgent) -> Bool {
+        guard agent.processWorkingDirectory.hasPrefix("/") else { return false }
+        if agent.kind.binaryName == "codex" && agent.codexSessionPath == nil {
+            return false
+        }
+        return true
+    }
+
+    private static func hydrationRetryDelay(afterAttempts attempts: Int) -> TimeInterval {
+        // Codex writes its rollout file moments after the process starts, so
+        // retry on every scan at first, then back off for agents whose
+        // details never resolve (e.g. codex sessions with no rollout file).
+        guard attempts > 5 else { return 0 }
+        return min(60, pow(2.0, Double(attempts - 4)))
     }
 
     private func scan() {
@@ -527,6 +578,10 @@ class AgentMonitor: ObservableObject {
             agent.codexSessionPath = result.codexSessionPath
             agent.gitBranch = result.gitBranch
             agent.gitRepoRoot = result.gitRepoRoot
+
+            if Self.isFullyHydrated(agent) {
+                hydrationBackoffByIdentity.removeValue(forKey: agent.processIdentity)
+            }
         }
 
         agents.sort(by: Self.menuSortsBefore)
@@ -644,6 +699,7 @@ class AgentMonitor: ObservableObject {
             statusDecisionLogCache.removeValue(forKey: identity)
             codexFallbackLogCache.removeValue(forKey: identity)
             detailCacheByIdentity.removeValue(forKey: identity)
+            hydrationBackoffByIdentity.removeValue(forKey: identity)
         }
 
         // Add new agents
@@ -715,6 +771,7 @@ class AgentMonitor: ObservableObject {
 
         prunePopoverSnapshotToLiveAgents()
         refreshChangedSessionCount()
+        hydrateUndetailedAgents()
     }
 
     // MARK: - Git Context
@@ -2217,13 +2274,18 @@ class AgentMonitor: ObservableObject {
     }
 
     private func getWorkingDirectory(for pid: Int32) -> String? {
-        let output = shell("lsof -p \(pid) -a -d cwd -Fn 2>/dev/null")
-        for line in output.components(separatedBy: "\n") {
-            if line.hasPrefix("n") {
-                return String(line.dropFirst())
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else {
+            return nil
+        }
+
+        let path = withUnsafePointer(to: info.pvi_cdir.vip_path) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                String(cString: $0)
             }
         }
-        return nil
+        return path.hasPrefix("/") ? path : nil
     }
 
     @discardableResult
