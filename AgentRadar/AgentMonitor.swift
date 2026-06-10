@@ -10,6 +10,15 @@ enum AgentStatus: Equatable {
     case needsAttention
     case idle
     case completed
+
+    var isAwaitingUser: Bool {
+        switch self {
+        case .needsAttention, .idle, .completed:
+            return true
+        case .running, .thinking:
+            return false
+        }
+    }
 }
 
 fileprivate struct AgentStatusHistory: OptionSet {
@@ -21,8 +30,10 @@ fileprivate struct AgentStatusHistory: OptionSet {
     static let idle = AgentStatusHistory(rawValue: 1 << 3)
     static let completed = AgentStatusHistory(rawValue: 1 << 4)
 
-    var hasMultipleStates: Bool {
-        rawValue.nonzeroBitCount > 1
+    static let activeStates: AgentStatusHistory = [.running, .thinking]
+
+    var hasVisitedActiveState: Bool {
+        !isDisjoint(with: Self.activeStates)
     }
 
     static func bit(for status: AgentStatus) -> AgentStatusHistory {
@@ -221,8 +232,10 @@ class DetectedAgent: ObservableObject, Identifiable {
 
     private var statusHistory: AgentStatusHistory = []
 
+    // Badge when the session did work (running/thinking) since the last popover
+    // open and has since settled into a state that's waiting on the user.
     var hasChangedStateSinceLastPopoverOpen: Bool {
-        statusHistory.hasMultipleStates
+        statusHistory.hasVisitedActiveState && status.isAwaitingUser
     }
 
     var displayName: String {
