@@ -218,6 +218,7 @@ struct PopoverView: View {
         VStack(spacing: 0) {
             HeaderBar(
                 agentCount: monitor.agents.count,
+                changedAgentCount: monitor.popoverChangedSessionCount,
                 lastScan: monitor.lastScan,
                 listMode: sessionListModeBinding
             )
@@ -287,24 +288,28 @@ struct PopoverView: View {
 
 private struct HeaderBar: View {
     let agentCount: Int
+    let changedAgentCount: Int
     let lastScan: Date
     @Binding var listMode: SessionListMode
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "dot.radiowaves.left.and.right")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.accentColor)
-                Text("Agent Radar")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.primary)
-            }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                    Text("Agent Radar")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                }
 
-            Spacer(minLength: 12)
+                Spacer(minLength: 12)
 
-            if agentCount > 0 {
-                SessionListModeToggle(listMode: $listMode)
+                if agentCount > 0 {
+                    SessionListModeToggle(listMode: $listMode)
+                }
             }
 
             HStack(spacing: 6) {
@@ -327,11 +332,39 @@ private struct HeaderBar: View {
                 Text(agentCount == 0 ? "No agents" : "\(agentCount) active")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.secondary)
+
+                Spacer(minLength: 8)
+
+                if agentCount > 0 {
+                    ChangedSessionCountPill(count: changedAgentCount)
+                }
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+    }
+}
+
+private struct ChangedSessionCountPill: View {
+    let count: Int
+
+    var body: some View {
+        Text("\(count) changed")
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundColor(count > 0 ? .white : .secondary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(count > 0 ? Color.blue : Color.primary.opacity(0.06))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            )
     }
 }
 
@@ -380,7 +413,11 @@ private struct AgentRowsView: View {
     var body: some View {
         LazyVStack(spacing: 0) {
             ForEach(Array(agents.enumerated()), id: \.element.id) { index, agent in
-                AgentRowView(agent: agent, monitor: monitor)
+                AgentRowView(
+                    agent: agent,
+                    monitor: monitor,
+                    hasChangedState: monitor.popoverChangedAgentIDs.contains(agent.id)
+                )
 
                 if index < agents.count - 1 {
                     Divider().padding(.horizontal, 16)
@@ -467,6 +504,7 @@ private struct BranchSectionView: View {
 struct AgentRowView: View {
     @ObservedObject var agent: DetectedAgent
     var monitor: AgentMonitor
+    let hasChangedState: Bool
 
     var statusColor: Color {
         switch agent.status {
@@ -512,7 +550,8 @@ struct AgentRowView: View {
                     customIconName: agent.kind.customIcon,
                     symbolName: agent.kind.icon,
                     statusSymbolName: statusIcon,
-                    statusTint: statusColor
+                    statusTint: statusColor,
+                    hasChangedState: hasChangedState
                 )
                 .padding(.trailing, 4)
 
@@ -566,6 +605,7 @@ struct AgentAvatarTileView: View {
     let symbolName: String
     let statusSymbolName: String
     let statusTint: Color
+    let hasChangedState: Bool
 
     var body: some View {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -613,6 +653,25 @@ struct AgentAvatarTileView: View {
                 )
                 .offset(x: 4, y: 4)
             }
+            .overlay(alignment: .topLeading) {
+                if hasChangedState {
+                    StateChangeDotView()
+                        .offset(x: -3, y: -3)
+                }
+            }
+    }
+}
+
+struct StateChangeDotView: View {
+    var body: some View {
+        Circle()
+            .fill(Color.blue)
+            .frame(width: 10, height: 10)
+            .overlay(
+                Circle()
+                    .stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 2)
+            )
+            .shadow(color: Color.black.opacity(0.12), radius: 1, x: 0, y: 1)
     }
 }
 

@@ -12,6 +12,35 @@ enum AgentStatus: Equatable {
     case completed
 }
 
+fileprivate struct AgentStatusHistory: OptionSet {
+    let rawValue: UInt8
+
+    static let running = AgentStatusHistory(rawValue: 1 << 0)
+    static let thinking = AgentStatusHistory(rawValue: 1 << 1)
+    static let needsAttention = AgentStatusHistory(rawValue: 1 << 2)
+    static let idle = AgentStatusHistory(rawValue: 1 << 3)
+    static let completed = AgentStatusHistory(rawValue: 1 << 4)
+
+    var hasMultipleStates: Bool {
+        rawValue.nonzeroBitCount > 1
+    }
+
+    static func bit(for status: AgentStatus) -> AgentStatusHistory {
+        switch status {
+        case .running:
+            return .running
+        case .thinking:
+            return .thinking
+        case .needsAttention:
+            return .needsAttention
+        case .idle:
+            return .idle
+        case .completed:
+            return .completed
+        }
+    }
+}
+
 // MARK: - Pending Tool Call
 
 struct PendingToolCall {
@@ -190,6 +219,12 @@ class DetectedAgent: ObservableObject, Identifiable {
     @Published var statusDebugSource: String = ""
     @Published var statusDebugDetails: String = ""
 
+    private var statusHistory: AgentStatusHistory = []
+
+    var hasChangedStateSinceLastPopoverOpen: Bool {
+        statusHistory.hasMultipleStates
+    }
+
     var displayName: String {
         let dir = URL(fileURLWithPath: workingDirectory).lastPathComponent
         return dir.isEmpty ? kind.displayName : "\(kind.displayName) — \(dir)"
@@ -244,6 +279,14 @@ class DetectedAgent: ObservableObject, Identifiable {
         self.status = .running
         self.lastActivity = Date()
     }
+
+    func recordStatusVisit(_ status: AgentStatus) {
+        statusHistory.insert(AgentStatusHistory.bit(for: status))
+    }
+
+    func resetStatusHistory(to status: AgentStatus) {
+        statusHistory = AgentStatusHistory.bit(for: status)
+    }
 }
 
 // MARK: - Agent Monitor
@@ -251,6 +294,9 @@ class DetectedAgent: ObservableObject, Identifiable {
 class AgentMonitor: ObservableObject {
     @Published var agents: [DetectedAgent] = []
     @Published var lastScan: Date = Date()
+    @Published private(set) var changedSessionCount: Int = 0
+    @Published private(set) var popoverChangedSessionCount: Int = 0
+    @Published private(set) var popoverChangedAgentIDs: Set<String> = []
 
     var onUpdate: (([DetectedAgent]) -> Void)?
     private var timer: Timer?
@@ -289,6 +335,22 @@ class AgentMonitor: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+    }
+
+    func prepareForPopoverOpen() {
+        popoverChangedAgentIDs = Set(
+            agents
+                .filter { $0.hasChangedStateSinceLastPopoverOpen }
+                .map(\.id)
+        )
+        popoverChangedSessionCount = popoverChangedAgentIDs.count
+
+        for agent in agents {
+            agent.resetStatusHistory(to: agent.status)
+        }
+
+        refreshChangedSessionCount()
+        onUpdate?(agents)
     }
 
     func refreshPopoverDetails() {
@@ -637,6 +699,9 @@ class AgentMonitor: ObservableObject {
 
         // Clean up dead process identities
         knownProcessIdentities = knownProcessIdentities.intersection(foundIdentities)
+
+        prunePopoverSnapshotToLiveAgents()
+        refreshChangedSessionCount()
     }
 
     // MARK: - Git Context
@@ -1690,6 +1755,7 @@ class AgentMonitor: ObservableObject {
         treeCPU: Double
     ) {
         agent.status = decision.status
+        agent.recordStatusVisit(decision.status)
         agent.currentActivity = decision.activity
         agent.statusDebugSource = decision.source
         agent.statusDebugDetails = decision.details
@@ -1700,6 +1766,21 @@ class AgentMonitor: ObservableObject {
             codexFallbackLogCache.removeValue(forKey: agent.processIdentity)
         }
         logStatusDecisionIfNeeded(decision, for: agent, procState: procState, treeCPU: treeCPU)
+    }
+
+    private func refreshChangedSessionCount() {
+        changedSessionCount = agents.filter(\.hasChangedStateSinceLastPopoverOpen).count
+    }
+
+    private func prunePopoverSnapshotToLiveAgents() {
+        guard !popoverChangedAgentIDs.isEmpty else {
+            popoverChangedSessionCount = 0
+            return
+        }
+
+        let liveAgentIDs = Set(agents.map(\.id))
+        popoverChangedAgentIDs = popoverChangedAgentIDs.intersection(liveAgentIDs)
+        popoverChangedSessionCount = popoverChangedAgentIDs.count
     }
 
     private func logStatusDecisionIfNeeded(

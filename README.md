@@ -7,6 +7,7 @@ A native macOS menu bar app that monitors AI coding agents running in your termi
 - **Lives in your menu bar** — shows a compact breakdown of needs input, in progress, and ready sessions
 - **Auto-detects agents** — scans running processes every 2 seconds for known AI coding agents
 - **Shows live status** — CPU, memory, uptime, working directory, and current activity per agent
+- **Tracks state changes** — shows how many sessions have changed state since you last opened the popover
 - **Claude Code deep integration** — reads JSONL transcripts for accurate status (thinking, tool approval, task completed)
 - **Tool approval details** — shows which tool is waiting for approval and the command/file involved
 - **Native notifications** — alerts you when an agent needs your attention
@@ -25,21 +26,15 @@ A native macOS menu bar app that monitors AI coding agents running in your termi
 
 To add more: edit `KnownAgent.all` in `AgentMonitor.swift`.
 
-## Menu Bar Icons
+## Menu Bar Icon
 
-The menu bar icon uses:
+The menu bar icon uses vertical bars for the current session mix:
 
 - `orange` — needs input / attention
 - `green` — in progress
 - `blue` — ready (completed + idle)
 
-| Icon | Meaning |
-|------|---------|
-| `dot.radiowaves.left.and.right` | Agent actively working |
-| `checkmark.circle` | All agents completed their tasks |
-| `N.circle.fill` (orange) | N agents need your attention |
-| `dot.radiowaves.left.and.right` (dimmed) | Agents idle |
-| `circle.dotted` | No agents running |
+When one or more sessions have visited multiple states since the last popover open, a blue count badge appears next to the bars. Opening the popover captures that count, marks changed rows with a blue dot, then resets tracking for the next interval.
 
 ## Setup
 

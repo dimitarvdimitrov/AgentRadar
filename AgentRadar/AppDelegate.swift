@@ -7,8 +7,9 @@ struct MenuBarStatusSummary {
     let working: Int
     let completed: Int
     let idle: Int
+    let changed: Int
 
-    static let empty = Self(attention: 0, working: 0, completed: 0, idle: 0)
+    static let empty = Self(attention: 0, working: 0, completed: 0, idle: 0, changed: 0)
 
     var total: Int {
         attention + working + completed + idle
@@ -20,7 +21,7 @@ struct MenuBarStatusSummary {
 
     func tooltip() -> String {
         guard total > 0 else { return "No sessions detected" }
-        return "Needs Input: \(attention) • In Progress: \(working) • Ready: \(ready)"
+        return "Needs Input: \(attention) • In Progress: \(working) • Ready: \(ready) • Changed: \(changed)"
     }
 }
 
@@ -77,7 +78,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             attention: needsAttention.count,
             working: working.count,
             completed: completed.count,
-            idle: idle.count
+            idle: idle.count,
+            changed: monitor?.changedSessionCount ?? 0
         )
         refreshStatusBar()
     }
@@ -148,7 +150,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let barWidth: CGFloat = 4
         let gap: CGFloat = 2.5
         let trackHeight: CGFloat = 14
-        let size = NSSize(width: 17, height: 18)
+        let iconWidth: CGFloat = 17
+        let iconHeight: CGFloat = 18
+        let badgeSpacing: CGFloat = 3
+        let changedCount = latestSummary.changed
+        let badgeText = changedCount > 99 ? "99+" : "\(changedCount)"
+        let badgeFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+        let badgeAttributes: [NSAttributedString.Key: Any] = [
+            .font: badgeFont,
+            .foregroundColor: NSColor.white,
+        ]
+        let badgeTextSize = (badgeText as NSString).size(withAttributes: badgeAttributes)
+        let badgeHeight: CGFloat = 12
+        let badgeWidth = changedCount > 0 ? max(13, ceil(badgeTextSize.width) + 7) : 0
+        let size = NSSize(
+            width: changedCount > 0 ? iconWidth + badgeSpacing + badgeWidth : iconWidth,
+            height: iconHeight
+        )
 
         let metrics: [(count: Int, color: NSColor)] = [
             (latestSummary.attention, .systemOrange),
@@ -162,7 +180,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         return NSImage(size: size, flipped: false) { rect in
             let totalWidth = (barWidth * CGFloat(metrics.count)) + (gap * CGFloat(metrics.count - 1))
-            let startX = (rect.width - totalWidth) / 2
+            let startX = (iconWidth - totalWidth) / 2
             let startY: CGFloat = 2
 
             if total == 0 {
@@ -177,30 +195,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     NSColor.tertiaryLabelColor.withAlphaComponent(0.22).setFill()
                     placeholderPath.fill()
                 }
+            } else {
+                for (index, metric) in metrics.enumerated() {
+                    guard metric.count > 0 else { continue }
 
-                return true
+                    let x = startX + CGFloat(index) * (barWidth + gap)
+                    let ratio = CGFloat(metric.count) / CGFloat(maxCount)
+                    let fillHeight = max(4, 4 + ((trackHeight - 4) * ratio))
+                    let fillRect = CGRect(
+                        x: x,
+                        y: startY + (trackHeight - fillHeight),
+                        width: barWidth,
+                        height: fillHeight
+                    )
+                    let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: barWidth / 2, yRadius: barWidth / 2)
+                    let alpha = index == 1 ? pulse : 1.0
+                    metric.color.withAlphaComponent(alpha).setFill()
+                    fillPath.fill()
+                }
             }
 
-            for (index, metric) in metrics.enumerated() {
-                guard metric.count > 0 else { continue }
-
-                let x = startX + CGFloat(index) * (barWidth + gap)
-                let ratio = CGFloat(metric.count) / CGFloat(maxCount)
-                let fillHeight = max(4, 4 + ((trackHeight - 4) * ratio))
-                let fillRect = CGRect(
-                    x: x,
-                    y: startY + (trackHeight - fillHeight),
-                    width: barWidth,
-                    height: fillHeight
+            if changedCount > 0 {
+                Self.drawChangedCountBadge(
+                    text: badgeText,
+                    textSize: badgeTextSize,
+                    attributes: badgeAttributes,
+                    rect: CGRect(
+                        x: iconWidth + badgeSpacing,
+                        y: (rect.height - badgeHeight) / 2,
+                        width: badgeWidth,
+                        height: badgeHeight
+                    )
                 )
-                let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: barWidth / 2, yRadius: barWidth / 2)
-                let alpha = index == 1 ? pulse : 1.0
-                metric.color.withAlphaComponent(alpha).setFill()
-                fillPath.fill()
             }
 
             return true
         }
+    }
+
+    private static func drawChangedCountBadge(
+        text: String,
+        textSize: NSSize,
+        attributes: [NSAttributedString.Key: Any],
+        rect: CGRect
+    ) {
+        let badgePath = NSBezierPath(
+            roundedRect: rect,
+            xRadius: rect.height / 2,
+            yRadius: rect.height / 2
+        )
+        NSColor.systemBlue.setFill()
+        badgePath.fill()
+
+        let textRect = CGRect(
+            x: rect.midX - (textSize.width / 2),
+            y: rect.midY - (textSize.height / 2) - 0.5,
+            width: textSize.width,
+            height: textSize.height
+        )
+        (text as NSString).draw(in: textRect, withAttributes: attributes)
     }
 
     // MARK: - Animation
@@ -250,6 +303,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            monitor?.prepareForPopoverOpen()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             monitor?.refreshPopoverDetails()
             NSApp.activate(ignoringOtherApps: true)
