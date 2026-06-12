@@ -56,24 +56,6 @@ struct ProcessTable {
         return descendants
     }
 
-    func treeCPU(for pid: Int32) -> Double {
-        var total = row(for: pid)?.cpuPercent ?? 0
-        var stack = Array(children(of: pid).reversed())
-        var visited = Set<Int32>()
-        visited.insert(pid)
-
-        while let process = stack.popLast() {
-            guard !visited.contains(process.pid) else { continue }
-            visited.insert(process.pid)
-            total += process.cpuPercent
-
-            for child in children(of: process.pid).reversed() {
-                stack.append(child)
-            }
-        }
-
-        return total
-    }
 }
 
 enum ProcessInspector {

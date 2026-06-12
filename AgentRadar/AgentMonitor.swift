@@ -1131,7 +1131,6 @@ class AgentMonitor: ObservableObject {
         // Check if process is backgrounded or stopped first
         let isForeground = procState.contains("+")
         let isStopped = procState.contains("T")
-        let treeCPU = processTable.treeCPU(for: agent.pid)
 
         if isStopped {
             applyStatusDecision(
@@ -1143,25 +1142,24 @@ class AgentMonitor: ObservableObject {
                     refreshLastActivity: false
                 ),
                 to: agent,
-                procState: procState,
-                treeCPU: treeCPU
+                procState: procState
             )
             return
         }
 
         // For Claude Code: use JSONL transcript for reliable status
         if agent.kind.binaryName == "claude" {
-            if let decision = claudeStatusFromTranscript(agent, procState: procState, treeCPU: treeCPU) {
-                applyStatusDecision(decision, to: agent, procState: procState, treeCPU: treeCPU)
+            if let decision = claudeStatusFromTranscript(agent, procState: procState) {
+                applyStatusDecision(decision, to: agent, procState: procState)
                 return
             }
         }
 
-        // Codex also persists structured session logs; use them instead of CPU-only heuristics.
+        // Codex also persists structured session logs; use them instead of process heuristics.
         if agent.kind.binaryName == "codex" {
             if let decision = codexStatusFromSession(agent) {
                 agent.pendingToolCall = nil
-                applyStatusDecision(decision, to: agent, procState: procState, treeCPU: treeCPU)
+                applyStatusDecision(decision, to: agent, procState: procState)
                 return
             }
         }
@@ -1176,8 +1174,7 @@ class AgentMonitor: ObservableObject {
                     refreshLastActivity: false
                 ),
                 to: agent,
-                procState: procState,
-                treeCPU: treeCPU
+                procState: procState
             )
             return
         }
@@ -1216,37 +1213,20 @@ class AgentMonitor: ObservableObject {
                     refreshLastActivity: true
                 ),
                 to: agent,
-                procState: procState,
-                treeCPU: treeCPU
+                procState: procState
             )
         } else {
-            if treeCPU > 3.0 {
-                applyStatusDecision(
-                    StatusDecision(
-                        status: .thinking,
-                        activity: "Thinking...",
-                        source: "tree_cpu",
-                        details: "reason=cpu_threshold",
-                        refreshLastActivity: true
-                    ),
-                    to: agent,
-                    procState: procState,
-                    treeCPU: treeCPU
-                )
-            } else {
-                applyStatusDecision(
-                    StatusDecision(
-                        status: .idle,
-                        activity: "Ready",
-                        source: "tree_cpu",
-                        details: "reason=cpu_below_threshold\(codexLogContext(for: agent))",
-                        refreshLastActivity: false
-                    ),
-                    to: agent,
-                    procState: procState,
-                    treeCPU: treeCPU
-                )
-            }
+            applyStatusDecision(
+                StatusDecision(
+                    status: .idle,
+                    activity: "Ready",
+                    source: "child_process",
+                    details: "reason=no_active_children\(codexLogContext(for: agent))",
+                    refreshLastActivity: false
+                ),
+                to: agent,
+                procState: procState
+            )
         }
     }
 
@@ -1257,8 +1237,7 @@ class AgentMonitor: ObservableObject {
     /// the agent IS waiting for user input, regardless of how long ago that was.
     private func claudeStatusFromTranscript(
         _ agent: DetectedAgent,
-        procState: String,
-        treeCPU: Double
+        procState: String
     ) -> StatusDecision? {
         // Convert working directory to Claude's project dir format:
         // /Users/foo/bar → -Users-foo-bar
@@ -1281,7 +1260,6 @@ class AgentMonitor: ObservableObject {
         }
 
         let staleness = Date().timeIntervalSince(transcript.modifiedAt)
-        let isActive = treeCPU > 3.0
         let transcriptName = URL(fileURLWithPath: transcript.path).lastPathComponent
 
         // Read recent lines and find the last assistant/user entry
@@ -1311,7 +1289,7 @@ class AgentMonitor: ObservableObject {
                 )
             } else if stopReason == "tool_use" {
                 // Agent wants to use a tool
-                if staleness < 3 || isActive {
+                if staleness < 3 {
                     // File was just updated or agent is actively working
                     agent.pendingToolCall = nil
                     return StatusDecision(
@@ -1345,7 +1323,7 @@ class AgentMonitor: ObservableObject {
             } else {
                 // stop_reason is null — still streaming or waiting for API
                 agent.pendingToolCall = nil
-                if staleness < 30 || isActive {
+                if staleness < 30 {
                     return StatusDecision(
                         status: .thinking,
                         activity: "Thinking...",
@@ -1354,7 +1332,7 @@ class AgentMonitor: ObservableObject {
                         refreshLastActivity: true
                     )
                 } else {
-                    // Stale and no CPU — likely done or stalled
+                    // Stale — likely done or stalled
                     return StatusDecision(
                         status: .completed,
                         activity: "Task completed",
@@ -1368,7 +1346,7 @@ class AgentMonitor: ObservableObject {
         case "user":
             // User sent a message or tool result — agent is working
             agent.pendingToolCall = nil
-            if staleness < 30 || isActive {
+            if staleness < 30 {
                 return StatusDecision(
                     status: .thinking,
                     activity: "Thinking...",
@@ -1961,8 +1939,7 @@ class AgentMonitor: ObservableObject {
     private func applyStatusDecision(
         _ decision: StatusDecision,
         to agent: DetectedAgent,
-        procState: String,
-        treeCPU: Double
+        procState: String
     ) {
         agent.status = decision.status
         agent.recordStatusVisit(decision.status)
@@ -1975,7 +1952,7 @@ class AgentMonitor: ObservableObject {
         if decision.source == "codex_session" {
             codexFallbackLogCache.removeValue(forKey: agent.processIdentity)
         }
-        logStatusDecisionIfNeeded(decision, for: agent, procState: procState, treeCPU: treeCPU)
+        logStatusDecisionIfNeeded(decision, for: agent, procState: procState)
     }
 
     private func refreshChangedSessionCount() {
@@ -1996,16 +1973,14 @@ class AgentMonitor: ObservableObject {
     private func logStatusDecisionIfNeeded(
         _ decision: StatusDecision,
         for agent: DetectedAgent,
-        procState: String,
-        treeCPU: Double
+        procState: String
     ) {
         let fingerprint = [
             "\(decision.status)",
             decision.activity,
             decision.source,
             decision.details,
-            procState,
-            String(format: "%.1f", treeCPU)
+            procState
         ].joined(separator: "|")
 
         guard statusDecisionLogCache[agent.processIdentity] != fingerprint else { return }
@@ -2020,7 +1995,6 @@ class AgentMonitor: ObservableObject {
             "activity=\(shellSafeLogValue(decision.activity))",
             "source=\(decision.source)",
             "proc_state=\(procState.isEmpty ? "-" : procState)",
-            String(format: "tree_cpu=%.1f", treeCPU),
             "details=\(shellSafeLogValue(decision.details))"
         ].joined(separator: " ")
 
