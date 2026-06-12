@@ -170,8 +170,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let metrics: [(count: Int, color: NSColor)] = [
             (latestSummary.attention, .systemOrange),
-            (latestSummary.working, .systemGreen),
-            (latestSummary.ready, .systemBlue),
+            (latestSummary.working, .systemBlue),
+            (latestSummary.ready, .systemGreen),
         ]
         let maxCount = max(metrics.map(\.count).max() ?? 0, 1)
         let pulse = animated ? (0.7 + 0.3 * ((sin(CGFloat(animFrame) * 0.3) + 1) / 2)) : 1.0

@@ -508,7 +508,7 @@ struct AgentRowView: View {
 
     var statusColor: Color {
         switch agent.status {
-        case .thinking:  return Color(red: 0.13, green: 0.66, blue: 0.58)
+        case .thinking:  return Color(red: 0.35, green: 0.62, blue: 0.98)
         case .running:   return Color(red: 0.22, green: 0.49, blue: 0.96)
         case .needsAttention: return Color(red: 0.95, green: 0.55, blue: 0.18)
         case .idle:      return Color.secondary
