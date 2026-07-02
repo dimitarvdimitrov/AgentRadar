@@ -603,9 +603,16 @@ class AgentMonitor: ObservableObject {
         let now = Date()
         var seenPIDs = Set<Int32>()
         let allAgentNames = Set(KnownAgent.all.map(\.binaryName))
+        // Only rows on a real TTY can become sessions (the loop below skips
+        // tty "??"), so GUI processes that share an agent's binary name (e.g.
+        // Claude.app's embedded claude-code helpers) must neither satisfy the
+        // exact-name match nor suppress the command-line fallback.
+        func sessionEligibleRows(named name: String) -> [ProcessSnapshot] {
+            processTable.rows(named: name).filter { $0.tty != "??" }
+        }
         let agentNamesNeedingFallback = Set(
             KnownAgent.all
-                .filter { processTable.rows(named: $0.binaryName).isEmpty }
+                .filter { sessionEligibleRows(named: $0.binaryName).isEmpty }
                 .map(\.binaryName)
         )
         var fallbackRowsByAgent: [String: [ProcessSnapshot]] = [:]
@@ -633,7 +640,7 @@ class AgentMonitor: ObservableObject {
         for agent in KnownAgent.all {
             // Match pgrep's process-name default first, then use the full
             // command-line fallback only for wrapper processes such as node.
-            let exactRows = processTable.rows(named: agent.binaryName)
+            let exactRows = sessionEligibleRows(named: agent.binaryName)
             let matchedRows = exactRows.isEmpty
                 ? fallbackRowsByAgent[agent.binaryName] ?? []
                 : exactRows
