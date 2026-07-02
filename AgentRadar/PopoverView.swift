@@ -217,7 +217,7 @@ struct PopoverView: View {
     var body: some View {
         VStack(spacing: 0) {
             HeaderBar(
-                agentCount: monitor.agents.count,
+                summary: SessionStatusSummary(statuses: monitor.agents.map(\.status)),
                 changedAgentCount: monitor.popoverChangedSessionCount,
                 lastScan: monitor.lastScan,
                 listMode: sessionListModeBinding
@@ -287,10 +287,17 @@ struct PopoverView: View {
 // MARK: - Header
 
 private struct HeaderBar: View {
-    let agentCount: Int
+    let summary: SessionStatusSummary
     let changedAgentCount: Int
     let lastScan: Date
     @Binding var listMode: SessionListMode
+
+    private var statusDotColor: Color {
+        if summary.attention > 0 { return .orange }
+        if summary.working > 0 { return .blue }
+        if summary.ready > 0 { return .green }
+        return Color.secondary.opacity(0.5)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -307,35 +314,33 @@ private struct HeaderBar: View {
 
                 Spacer(minLength: 12)
 
-                if agentCount > 0 {
+                if summary.total > 0 {
                     SessionListModeToggle(listMode: $listMode)
                 }
             }
 
             HStack(spacing: 6) {
-                if agentCount > 0 {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 6, height: 6)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.green.opacity(0.3), lineWidth: 3)
-                                .scaleEffect(1.5)
-                                .animation(.easeOut(duration: 1).repeatForever(autoreverses: true), value: agentCount)
-                        )
-                } else {
-                    Circle()
-                        .fill(Color.secondary.opacity(0.5))
-                        .frame(width: 6, height: 6)
-                }
+                Circle()
+                    .fill(statusDotColor)
+                    .frame(width: 6, height: 6)
+                    .overlay(
+                        Circle()
+                            .stroke(statusDotColor.opacity(0.3), lineWidth: 3)
+                            .scaleEffect(1.5)
+                            .opacity(summary.working > 0 ? 1 : 0)
+                            .animation(
+                                .easeOut(duration: 1).repeatForever(autoreverses: true),
+                                value: summary.working
+                            )
+                    )
 
-                Text(agentCount == 0 ? "No agents" : "\(agentCount) active")
+                Text(summary.headline)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.secondary)
 
                 Spacer(minLength: 8)
 
-                if agentCount > 0 {
+                if summary.total > 0 {
                     ChangedSessionCountPill(count: changedAgentCount)
                 }
             }

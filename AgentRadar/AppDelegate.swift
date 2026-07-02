@@ -2,29 +2,6 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
-struct MenuBarStatusSummary {
-    let attention: Int
-    let working: Int
-    let completed: Int
-    let idle: Int
-    let changed: Int
-
-    static let empty = Self(attention: 0, working: 0, completed: 0, idle: 0, changed: 0)
-
-    var total: Int {
-        attention + working + completed + idle
-    }
-
-    var ready: Int {
-        completed + idle
-    }
-
-    func tooltip() -> String {
-        guard total > 0 else { return "No sessions detected" }
-        return "Needs Input: \(attention) • In Progress: \(working) • Ready: \(ready) • Changed: \(changed)"
-    }
-}
-
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
@@ -32,7 +9,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var animationTimer: Timer?
     var animFrame = 0
     var isAnimating = false
-    var latestSummary = MenuBarStatusSummary.empty
+    var latestSummary = SessionStatusSummary.empty
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
@@ -69,16 +46,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func handleAgentUpdate(_ agents: [DetectedAgent]) {
-        let needsAttention = agents.filter { $0.status == .needsAttention }
-        let working = agents.filter { $0.status == .running || $0.status == .thinking }
-        let completed = agents.filter { $0.status == .completed }
-        let idle = agents.filter { $0.status == .idle }
-
-        latestSummary = MenuBarStatusSummary(
-            attention: needsAttention.count,
-            working: working.count,
-            completed: completed.count,
-            idle: idle.count,
+        latestSummary = SessionStatusSummary(
+            statuses: agents.map(\.status),
             changed: monitor?.changedSessionCount ?? 0
         )
         refreshStatusBar()
@@ -88,7 +57,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusBar(summary: latestSummary)
     }
 
-    func updateStatusBar(summary: MenuBarStatusSummary) {
+    func updateStatusBar(summary: SessionStatusSummary) {
         guard let button = statusItem?.button else { return }
 
         button.title = ""

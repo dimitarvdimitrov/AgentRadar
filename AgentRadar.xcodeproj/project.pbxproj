@@ -13,6 +13,11 @@
 		A003 /* AgentMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B003 /* AgentMonitor.swift */; };
 		A004 /* PopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B004 /* PopoverView.swift */; };
 		A006 /* ProcessInspection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B007 /* ProcessInspection.swift */; };
+		A008 /* AgentModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B008 /* AgentModel.swift */; };
+		A009 /* ClaudeStatusRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = B009 /* ClaudeStatusRules.swift */; };
+		A010 /* CodexStatusRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = B010 /* CodexStatusRules.swift */; };
+		A011 /* SessionMatching.swift in Sources */ = {isa = PBXBuildFile; fileRef = B011 /* SessionMatching.swift */; };
+		A012 /* SessionStatusSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = B012 /* SessionStatusSummary.swift */; };
 		AABB001122334456 /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABB001122334455 /* UpdateChecker.swift */; };
 /* End PBXBuildFile section */
 
@@ -25,6 +30,11 @@
 		B004 /* PopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverView.swift; sourceTree = "<group>"; };
 		B005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B007 /* ProcessInspection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessInspection.swift; sourceTree = "<group>"; };
+		B008 /* AgentModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentModel.swift; sourceTree = "<group>"; };
+		B009 /* ClaudeStatusRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeStatusRules.swift; sourceTree = "<group>"; };
+		B010 /* CodexStatusRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexStatusRules.swift; sourceTree = "<group>"; };
+		B011 /* SessionMatching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMatching.swift; sourceTree = "<group>"; };
+		B012 /* SessionStatusSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStatusSummary.swift; sourceTree = "<group>"; };
 		AABB001122334455 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -50,15 +60,28 @@
 			isa = PBXGroup;
 			children = (
 				B006 /* Assets.xcassets */,
+				D003 /* Core */,
 				B001 /* AgentRadarApp.swift */,
 				B002 /* AppDelegate.swift */,
 				AABB001122334455 /* UpdateChecker.swift */,
 				B003 /* AgentMonitor.swift */,
-				B007 /* ProcessInspection.swift */,
 				B004 /* PopoverView.swift */,
 				B005 /* Info.plist */,
 			);
 			path = AgentRadar;
+			sourceTree = "<group>";
+		};
+		D003 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				B008 /* AgentModel.swift */,
+				B009 /* ClaudeStatusRules.swift */,
+				B010 /* CodexStatusRules.swift */,
+				B007 /* ProcessInspection.swift */,
+				B011 /* SessionMatching.swift */,
+				B012 /* SessionStatusSummary.swift */,
+			);
+			path = Core;
 			sourceTree = "<group>";
 		};
 		D002 /* Products */ = {
@@ -135,7 +158,12 @@
 				A002 /* AppDelegate.swift in Sources */,
 				AABB001122334456 /* UpdateChecker.swift in Sources */,
 				A003 /* AgentMonitor.swift in Sources */,
+				A008 /* AgentModel.swift in Sources */,
+				A009 /* ClaudeStatusRules.swift in Sources */,
+				A010 /* CodexStatusRules.swift in Sources */,
 				A006 /* ProcessInspection.swift in Sources */,
+				A011 /* SessionMatching.swift in Sources */,
+				A012 /* SessionStatusSummary.swift in Sources */,
 				A004 /* PopoverView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

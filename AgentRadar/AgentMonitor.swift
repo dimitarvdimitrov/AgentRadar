@@ -2,82 +2,6 @@ import Foundation
 import Combine
 import AppKit
 
-// MARK: - Agent Status
-
-enum AgentStatus: Equatable {
-    case running
-    case thinking
-    case needsAttention
-    case idle
-    case completed
-
-    var isAwaitingUser: Bool {
-        switch self {
-        case .needsAttention, .idle, .completed:
-            return true
-        case .running, .thinking:
-            return false
-        }
-    }
-}
-
-fileprivate struct AgentStatusHistory: OptionSet {
-    let rawValue: UInt8
-
-    static let running = AgentStatusHistory(rawValue: 1 << 0)
-    static let thinking = AgentStatusHistory(rawValue: 1 << 1)
-    static let needsAttention = AgentStatusHistory(rawValue: 1 << 2)
-    static let idle = AgentStatusHistory(rawValue: 1 << 3)
-    static let completed = AgentStatusHistory(rawValue: 1 << 4)
-
-    static let activeStates: AgentStatusHistory = [.running, .thinking]
-
-    var hasVisitedActiveState: Bool {
-        !isDisjoint(with: Self.activeStates)
-    }
-
-    static func bit(for status: AgentStatus) -> AgentStatusHistory {
-        switch status {
-        case .running:
-            return .running
-        case .thinking:
-            return .thinking
-        case .needsAttention:
-            return .needsAttention
-        case .idle:
-            return .idle
-        case .completed:
-            return .completed
-        }
-    }
-}
-
-// MARK: - Pending Tool Call
-
-struct PendingToolCall {
-    let toolName: String    // "Bash", "Write", "Edit", etc.
-    let summary: String     // "npx tsc --noEmit", "/foo/bar.swift", etc.
-}
-
-// MARK: - Known Agent Binary
-
-struct KnownAgent {
-    let binaryName: String       // exact process name
-    let displayName: String
-    let icon: String             // SF Symbol
-    let customIcon: String?      // Custom asset name
-    let color: String            // hex
-
-    static let all: [KnownAgent] = [
-        KnownAgent(binaryName: "claude", displayName: "Claude Code", icon: "sparkles", customIcon: "claude-icon", color: "#D97706"),
-        KnownAgent(binaryName: "codex", displayName: "Codex CLI", icon: "terminal.fill", customIcon: "codex-icon", color: "#10B981"),
-        KnownAgent(binaryName: "gemini", displayName: "Gemini CLI", icon: "g.circle.fill", customIcon: "gemini-icon", color: "#3B82F6"),
-        KnownAgent(binaryName: "aider", displayName: "Aider", icon: "hammer.fill", customIcon: nil, color: "#EC4899"),
-        KnownAgent(binaryName: "continue", displayName: "Continue", icon: "arrow.triangle.2.circlepath", customIcon: nil, color: "#F59E0B"),
-        KnownAgent(binaryName: "opencode", displayName: "OpenCode", icon: "chevron.left.forwardslash.chevron.right", customIcon: nil, color: "#0EA5E9"),
-    ]
-}
-
 fileprivate struct AgentProcessIdentity: Hashable {
     let pid: Int32
     let startTime: Date
@@ -141,11 +65,6 @@ private struct RecentFileInfo {
     let fileSize: UInt64
 }
 
-private struct AgentCommandLineMatchCacheEntry {
-    let commandLine: String
-    let agentNames: Set<String>
-}
-
 private struct GitRepoCacheEntry {
     let repoRoot: String
     let gitDir: String
@@ -180,11 +99,6 @@ private struct CodexSessionLookupResult {
     let debug: String
 }
 
-private struct CodexStatusProbe {
-    let decision: StatusDecision?
-    let debug: String
-}
-
 private struct CodexStatusCacheEntry {
     let fileSize: UInt64
     let modifiedAt: Date?
@@ -195,14 +109,6 @@ private struct ClaudeTranscriptEntryCacheEntry {
     let fileSize: UInt64
     let modifiedAt: Date
     let entry: [String: Any]?
-}
-
-private struct StatusDecision {
-    let status: AgentStatus
-    let activity: String
-    let source: String
-    let details: String
-    let refreshLastActivity: Bool
 }
 
 // MARK: - Detected Agent
@@ -598,101 +504,43 @@ class AgentMonitor: ObservableObject {
         processTable: ProcessTable,
         commandLineAgentMatchCacheByPID: inout [Int32: AgentCommandLineMatchCacheEntry]
     ) -> [DetectedAgentSnapshot] {
-        var results: [DetectedAgentSnapshot] = []
-        let myPID = ProcessInfo.processInfo.processIdentifier
         let now = Date()
-        var seenPIDs = Set<Int32>()
-        let allAgentNames = Set(KnownAgent.all.map(\.binaryName))
-        // Only rows on a real TTY can become sessions (the loop below skips
-        // tty "??"), so GUI processes that share an agent's binary name (e.g.
-        // Claude.app's embedded claude-code helpers) must neither satisfy the
-        // exact-name match nor suppress the command-line fallback.
-        func sessionEligibleRows(named name: String) -> [ProcessSnapshot] {
-            processTable.rows(named: name).filter { $0.tty != "??" }
-        }
-        let agentNamesNeedingFallback = Set(
-            KnownAgent.all
-                .filter { sessionEligibleRows(named: $0.binaryName).isEmpty }
-                .map(\.binaryName)
+        let candidates = SessionMatching.sessionCandidates(
+            in: processTable,
+            excludingPID: ProcessInfo.processInfo.processIdentifier,
+            commandLineMatchCache: &commandLineAgentMatchCacheByPID
         )
-        var fallbackRowsByAgent: [String: [ProcessSnapshot]] = [:]
 
-        if !agentNamesNeedingFallback.isEmpty {
-            for row in processTable.byPID.values where Self.canHostAgentBinFallback(row: row, agentNames: allAgentNames) {
-                let matchingAgentNames = Self.cachedAgentCommandLineMatches(
-                    for: row,
-                    allAgentNames: allAgentNames,
-                    cache: &commandLineAgentMatchCacheByPID
-                )
-
-                for agentName in matchingAgentNames where agentNamesNeedingFallback.contains(agentName) {
-                    fallbackRowsByAgent[agentName, default: []].append(row)
-                }
-            }
+        return candidates.map { candidate in
+            let row = candidate.row
+            let agent = candidate.kind
+            let cmd = row.commandLine.isEmpty ? agent.binaryName : row.commandLine
+            let elapsedTime = SessionMatching.elapsedTime(from: row.elapsedTime)
+            let detectedStartTime = SessionMatching.processStartTime(now: now, elapsedTime: elapsedTime)
+            let processIdentity = Self.stableProcessIdentity(
+                pid: row.pid,
+                detectedStartTime: detectedStartTime,
+                existingIdentity: existingIdentitiesByPID[row.pid]
+            )
+            let details = cachedDetailsByIdentity[processIdentity]
+            let processWorkingDirectory = details?.processWorkingDirectory ?? "~"
+            return DetectedAgentSnapshot(
+                processIdentity: processIdentity,
+                pid: row.pid,
+                kind: agent,
+                startTime: processIdentity.startTime,
+                processWorkingDirectory: processWorkingDirectory,
+                workingDirectory: details?.workingDirectory ?? processWorkingDirectory,
+                cmd: cmd,
+                tty: row.tty,
+                codexSessionIDHint: agent.binaryName == "codex"
+                    ? CodexStatusRules.resumeSessionID(from: cmd)
+                    : nil,
+                codexSessionPath: details?.codexSessionPath,
+                gitBranch: details?.gitBranch,
+                gitRepoRoot: details?.gitRepoRoot
+            )
         }
-
-        let livePIDs = Set(processTable.byPID.keys)
-        commandLineAgentMatchCacheByPID = commandLineAgentMatchCacheByPID.filter { pid, entry in
-            guard livePIDs.contains(pid), let row = processTable.row(for: pid) else { return false }
-            return row.commandLine == entry.commandLine
-        }
-
-        for agent in KnownAgent.all {
-            // Match pgrep's process-name default first, then use the full
-            // command-line fallback only for wrapper processes such as node.
-            let exactRows = sessionEligibleRows(named: agent.binaryName)
-            let matchedRows = exactRows.isEmpty
-                ? fallbackRowsByAgent[agent.binaryName] ?? []
-                : exactRows
-            let rows = matchedRows.sorted { $0.pid < $1.pid }  // Lowest PID first (parent process)
-            guard !rows.isEmpty else { continue }
-
-            // Track TTYs to avoid adding child workers on the same terminal
-            var seenTTYs = Set<String>()
-
-            for row in rows {
-                let pid = row.pid
-                if pid == myPID || seenPIDs.contains(pid) { continue }
-
-                let elapsedTime = Self.elapsedTime(from: row.elapsedTime)
-                let tty = row.tty
-                // Skip processes not on a real TTY (GUI apps show "??")
-                guard tty != "??" else { continue }
-                // Skip duplicate agents on the same TTY (child node workers)
-                guard !seenTTYs.contains(tty) else { continue }
-                seenTTYs.insert(tty)
-
-                let cmd = row.commandLine.isEmpty ? agent.binaryName : row.commandLine
-                let detectedStartTime = Self.processStartTime(now: now, elapsedTime: elapsedTime)
-                let processIdentity = Self.stableProcessIdentity(
-                    pid: pid,
-                    detectedStartTime: detectedStartTime,
-                    existingIdentity: existingIdentitiesByPID[pid]
-                )
-                let details = cachedDetailsByIdentity[processIdentity]
-                let processWorkingDirectory = details?.processWorkingDirectory ?? "~"
-                results.append(
-                    DetectedAgentSnapshot(
-                        processIdentity: processIdentity,
-                        pid: pid,
-                        kind: agent,
-                        startTime: processIdentity.startTime,
-                        processWorkingDirectory: processWorkingDirectory,
-                        workingDirectory: details?.workingDirectory ?? processWorkingDirectory,
-                        cmd: cmd,
-                        tty: tty,
-                        codexSessionIDHint: agent.binaryName == "codex"
-                            ? Self.codexResumeSessionID(from: cmd)
-                            : nil,
-                        codexSessionPath: details?.codexSessionPath,
-                        gitBranch: details?.gitBranch,
-                        gitRepoRoot: details?.gitRepoRoot
-                    )
-                )
-                seenPIDs.insert(pid)
-            }
-        }
-        return results
     }
 
     // MARK: - Reconcile
@@ -954,43 +802,6 @@ class AgentMonitor: ObservableObject {
             .lowercased() ?? ""
     }
 
-    private static func elapsedTime(from value: String) -> TimeInterval {
-        let parts = value.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: true)
-
-        let dayCount: Int
-        let clockPart: Substring
-
-        if parts.count == 2 {
-            dayCount = Int(parts[0]) ?? 0
-            clockPart = parts[1]
-        } else {
-            dayCount = 0
-            clockPart = parts[0]
-        }
-
-        let clockComponents = clockPart
-            .split(separator: ":")
-            .compactMap { Int($0) }
-
-        switch clockComponents.count {
-        case 2:
-            let minutes = clockComponents[0]
-            let seconds = clockComponents[1]
-            return TimeInterval((dayCount * 24 * 60 * 60) + (minutes * 60) + seconds)
-        case 3:
-            let hours = clockComponents[0]
-            let minutes = clockComponents[1]
-            let seconds = clockComponents[2]
-            return TimeInterval((dayCount * 24 * 60 * 60) + (hours * 60 * 60) + (minutes * 60) + seconds)
-        default:
-            return 0
-        }
-    }
-
-    private static func processStartTime(now: Date, elapsedTime: TimeInterval) -> Date {
-        Date(timeIntervalSince1970: (now.timeIntervalSince1970 - elapsedTime).rounded())
-    }
-
     private static func fileSize(from attrs: [FileAttributeKey: Any]) -> UInt64? {
         if let size = attrs[.size] as? UInt64 {
             return size
@@ -1015,89 +826,6 @@ class AgentMonitor: ObservableObject {
         }
 
         return AgentProcessIdentity(pid: pid, startTime: detectedStartTime)
-    }
-
-    private static func canHostAgentBinFallback(row: ProcessSnapshot, agentNames: Set<String>) -> Bool {
-        switch row.processName {
-        case "node", "python", "python3", "bun", "deno", "ruby",
-             "bash", "zsh", "sh", "env", "npx", "npm", "pnpm", "yarn":
-            return true
-        default:
-            if row.processName.hasPrefix("python") {
-                return true
-            }
-            // Claude Code reports its version string (e.g. "2.1.170") as the
-            // process name, so also accept rows launched as an agent binary.
-            return agentNames.contains(firstCommandTokenBasename(row.commandLine))
-        }
-    }
-
-    private static func firstCommandTokenBasename(_ commandLine: String) -> String {
-        let token = commandLine.prefix { !$0.isWhitespace }
-        if let slashIndex = token.lastIndex(of: "/") {
-            return String(token[token.index(after: slashIndex)...])
-        }
-        return String(token)
-    }
-
-    private static func cachedAgentCommandLineMatches(
-        for row: ProcessSnapshot,
-        allAgentNames: Set<String>,
-        cache: inout [Int32: AgentCommandLineMatchCacheEntry]
-    ) -> Set<String> {
-        if let entry = cache[row.pid],
-           entry.commandLine == row.commandLine {
-            return entry.agentNames
-        }
-
-        let agentNames = agentBinFallbackNames(in: row.commandLine, matching: allAgentNames)
-        cache[row.pid] = AgentCommandLineMatchCacheEntry(
-            commandLine: row.commandLine,
-            agentNames: agentNames
-        )
-        return agentNames
-    }
-
-    private static func agentBinFallbackNames(in commandLine: String, matching agentNames: Set<String>) -> Set<String> {
-        let needle = "bin/"
-        var names = Set<String>()
-        var searchRange = commandLine.startIndex..<commandLine.endIndex
-
-        let firstToken = firstCommandTokenBasename(commandLine)
-        if agentNames.contains(firstToken) {
-            names.insert(firstToken)
-        }
-
-        while let range = commandLine.range(of: needle, range: searchRange) {
-            let nameStart = range.upperBound
-            var nameEnd = nameStart
-
-            while nameEnd < commandLine.endIndex, !commandLine[nameEnd].isWhitespace {
-                nameEnd = commandLine.index(after: nameEnd)
-            }
-
-            if nameStart < nameEnd {
-                let name = String(commandLine[nameStart..<nameEnd])
-                if agentNames.contains(name) {
-                    names.insert(name)
-                }
-            }
-
-            searchRange = nameEnd..<commandLine.endIndex
-        }
-
-        return names
-    }
-
-    private static func codexResumeSessionID(from commandLine: String) -> String? {
-        let parts = commandLine.split(separator: " ")
-        guard let resumeIndex = parts.firstIndex(where: { $0 == "resume" }) else { return nil }
-
-        let sessionIndex = parts.index(after: resumeIndex)
-        guard sessionIndex < parts.endIndex else { return nil }
-
-        let sessionID = String(parts[sessionIndex]).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-        return sessionID.isEmpty ? nil : sessionID
     }
 
     private func normalizePath(_ path: String) -> String {
@@ -1256,7 +984,7 @@ class AgentMonitor: ObservableObject {
         // differ from the process cwd — resolve the id across all project dirs.
         // Otherwise, match a transcript to this process by creation time.
         let transcript: RecentFileInfo
-        if let sessionID = Self.claudeSessionID(fromCommandLine: agent.commandLine),
+        if let sessionID = ClaudeStatusRules.sessionID(fromCommandLine: agent.commandLine),
            let pinned = claudeTranscript(forSessionID: sessionID, preferredProjectDir: projectDir) {
             claudePinnedTranscriptByIdentity[agent.processIdentity] = pinned.path
             transcript = pinned
@@ -1279,129 +1007,16 @@ class AgentMonitor: ObservableObject {
             return nil
         }
 
-        let msgType = entry["type"] as? String ?? ""
-        let message = entry["message"] as? [String: Any]
-        let stopReason = message?["stop_reason"] as? String
-
-        switch msgType {
-        case "assistant":
-            if stopReason == "end_turn" {
-                agent.pendingToolCall = nil
-                return StatusDecision(
-                    status: .completed,
-                    activity: "Task completed",
-                    source: "claude_transcript",
-                    details: "entry=assistant stop_reason=end_turn transcript=\(transcriptName) staleness=\(Int(staleness))s",
-                    refreshLastActivity: false
-                )
-            } else if stopReason == "tool_use" {
-                // Agent wants to use a tool
-                if staleness < 3 {
-                    // File was just updated or agent is actively working
-                    agent.pendingToolCall = nil
-                    return StatusDecision(
-                        status: .thinking,
-                        activity: "Running tool...",
-                        source: "claude_transcript",
-                        details: "entry=assistant stop_reason=tool_use transcript=\(transcriptName) staleness=\(Int(staleness))s",
-                        refreshLastActivity: true
-                    )
-                } else {
-                    // Tool call sitting there — waiting for user approval
-                    if let contentArray = message?["content"] as? [[String: Any]] {
-                        for block in contentArray {
-                            if block["type"] as? String == "tool_use" {
-                                let name = block["name"] as? String ?? "Tool"
-                                let input = block["input"] as? [String: Any] ?? [:]
-                                let summary = Self.toolSummary(name: name, input: input)
-                                agent.pendingToolCall = PendingToolCall(toolName: name, summary: summary)
-                                break
-                            }
-                        }
-                    }
-                    return StatusDecision(
-                        status: .needsAttention,
-                        activity: "Waiting for tool approval",
-                        source: "claude_transcript",
-                        details: "entry=assistant stop_reason=tool_use transcript=\(transcriptName) staleness=\(Int(staleness))s",
-                        refreshLastActivity: false
-                    )
-                }
-            } else {
-                // stop_reason is null — still streaming or waiting for API
-                agent.pendingToolCall = nil
-                if staleness < 30 {
-                    return StatusDecision(
-                        status: .thinking,
-                        activity: "Thinking...",
-                        source: "claude_transcript",
-                        details: "entry=assistant stop_reason=nil transcript=\(transcriptName) staleness=\(Int(staleness))s",
-                        refreshLastActivity: true
-                    )
-                } else {
-                    // Stale — likely done or stalled
-                    return StatusDecision(
-                        status: .completed,
-                        activity: "Task completed",
-                        source: "claude_transcript",
-                        details: "entry=assistant stop_reason=nil transcript=\(transcriptName) staleness=\(Int(staleness))s",
-                        refreshLastActivity: false
-                    )
-                }
-            }
-
-        case "user":
-            // User sent a message or tool result — agent is working
-            agent.pendingToolCall = nil
-            if staleness < 30 {
-                return StatusDecision(
-                    status: .thinking,
-                    activity: "Thinking...",
-                    source: "claude_transcript",
-                    details: "entry=user transcript=\(transcriptName) staleness=\(Int(staleness))s",
-                    refreshLastActivity: true
-                )
-            } else {
-                return StatusDecision(
-                    status: .running,
-                    activity: "Active",
-                    source: "claude_transcript",
-                    details: "entry=user transcript=\(transcriptName) staleness=\(Int(staleness))s",
-                    refreshLastActivity: true
-                )
-            }
-
-        default:
+        guard let outcome = ClaudeStatusRules.decision(
+            entry: entry,
+            staleness: staleness,
+            transcriptName: transcriptName
+        ) else {
             return nil
         }
-    }
 
-    /// Session id explicitly pinned on the claude command line via
-    /// `--resume <uuid>`, `-r <uuid>`, or `--session-id <uuid>`.
-    /// Returns nil for the bare `--resume` picker form.
-    private static func claudeSessionID(fromCommandLine commandLine: String) -> String? {
-        let parts = commandLine.split(separator: " ")
-
-        for (index, part) in parts.enumerated() {
-            var candidate: Substring?
-
-            if part == "--resume" || part == "-r" || part == "--session-id" {
-                if index + 1 < parts.count {
-                    candidate = parts[index + 1]
-                }
-            } else if let equalsIndex = part.firstIndex(of: "="),
-                      part[..<equalsIndex] == "--resume" || part[..<equalsIndex] == "--session-id" {
-                candidate = part[part.index(after: equalsIndex)...]
-            }
-
-            guard let candidate else { continue }
-            let value = String(candidate).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            if UUID(uuidString: value) != nil {
-                return value.lowercased()
-            }
-        }
-
-        return nil
+        agent.pendingToolCall = outcome.pendingToolCall
+        return outcome.decision
     }
 
     /// Locate the transcript for a specific session id, checking the cwd-derived
@@ -1886,60 +1501,10 @@ class AgentMonitor: ObservableObject {
             )
         }
 
-        let lines = content
-            .components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .reversed()
-        var recentEventTypes: [String] = []
-        var eventMsgCount = 0
-
-        for line in lines {
-            guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let type = json["type"] as? String,
-                  type == "event_msg",
-                  let payload = json["payload"] as? [String: Any],
-                  let eventType = payload["type"] as? String else {
-                continue
-            }
-
-            eventMsgCount += 1
-            if recentEventTypes.count < 8 {
-                recentEventTypes.append(eventType)
-            }
-
-            switch eventType {
-            case "task_started":
-                return CodexStatusProbe(
-                    decision: StatusDecision(
-                        status: .thinking,
-                        activity: "Working...",
-                        source: "codex_session",
-                        details: "event=task_started session=\(URL(fileURLWithPath: path).lastPathComponent) timestamp=\(json["timestamp"] as? String ?? "-")",
-                        refreshLastActivity: true
-                    ),
-                    debug: "status=task_started session=\(URL(fileURLWithPath: path).lastPathComponent)"
-                )
-            case "task_complete", "turn_aborted":
-                return CodexStatusProbe(
-                    decision: StatusDecision(
-                        status: .idle,
-                        activity: "Ready",
-                        source: "codex_session",
-                        details: "event=\(eventType) session=\(URL(fileURLWithPath: path).lastPathComponent) timestamp=\(json["timestamp"] as? String ?? "-")",
-                        refreshLastActivity: false
-                    ),
-                    debug: "status=\(eventType) session=\(URL(fileURLWithPath: path).lastPathComponent)"
-                )
-            default:
-                continue
-            }
-        }
-
-        let recentEvents = recentEventTypes.isEmpty ? "-" : recentEventTypes.joined(separator: ",")
-        return CodexStatusProbe(
-            decision: nil,
-            debug: "status=no_task_event session=\(URL(fileURLWithPath: path).lastPathComponent) event_msgs=\(eventMsgCount) recent_events=\(recentEvents) read_size=\(readSize)"
+        return CodexStatusRules.probe(
+            fromSessionTail: content,
+            sessionName: URL(fileURLWithPath: path).lastPathComponent,
+            readSize: readSize
         )
     }
 
@@ -2008,11 +1573,21 @@ class AgentMonitor: ObservableObject {
         appendStatusLog(logLine + "\n")
     }
 
+    private static let maxStatusLogBytes: UInt64 = 50 * 1024 * 1024
+
     private func appendStatusLog(_ line: String) {
         let data = Data(line.utf8)
         let fileManager = FileManager.default
 
         if !fileManager.fileExists(atPath: statusLogURL.path) {
+            fileManager.createFile(atPath: statusLogURL.path, contents: data)
+            return
+        }
+
+        if let attrs = try? fileManager.attributesOfItem(atPath: statusLogURL.path),
+           let size = Self.fileSize(from: attrs),
+           size > Self.maxStatusLogBytes {
+            rotateStatusLog()
             fileManager.createFile(atPath: statusLogURL.path, contents: data)
             return
         }
@@ -2025,6 +1600,15 @@ class AgentMonitor: ObservableObject {
         } catch {
             return
         }
+    }
+
+    /// Keep one rotated generation so the log can't grow without bound.
+    private func rotateStatusLog() {
+        let fileManager = FileManager.default
+        let rotatedURL = statusLogURL.deletingLastPathComponent()
+            .appendingPathComponent("status.log.1")
+        try? fileManager.removeItem(at: rotatedURL)
+        try? fileManager.moveItem(at: statusLogURL, to: rotatedURL)
     }
 
     private func logCodexFallbackIfNeeded(for agent: DetectedAgent, reason: String) {
@@ -2146,19 +1730,7 @@ class AgentMonitor: ObservableObject {
         let data = handle.readDataToEndOfFile()
 
         guard let content = String(data: data, encoding: .utf8) else { return nil }
-        let lines = content.components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .reversed()
-
-        for line in lines {
-            guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let type = json["type"] as? String else { continue }
-            if type == "assistant" || type == "user" {
-                return json
-            }
-        }
-        return nil
+        return ClaudeStatusRules.lastRelevantEntry(inTranscriptTail: content)
     }
 
     /// Extract a human-readable command from a full command path
@@ -2171,31 +1743,6 @@ class AgentMonitor: ObservableObject {
             return "\(binary) \(args)"
         }
         return binary
-    }
-
-    /// Generate a human-readable summary for a pending tool call
-    private static func toolSummary(name: String, input: [String: Any]) -> String {
-        switch name {
-        case "Bash":
-            if let cmd = input["command"] as? String {
-                return String(cmd.prefix(60))
-            }
-        case "Write", "Read", "Edit":
-            if let path = input["file_path"] as? String {
-                return URL(fileURLWithPath: path).lastPathComponent
-            }
-        case "Glob":
-            if let pattern = input["pattern"] as? String {
-                return pattern
-            }
-        case "Grep":
-            if let query = input["query"] as? String {
-                return query
-            }
-        default:
-            break
-        }
-        return name
     }
 
     // MARK: - Layer 2: Walk parent chain to find owning .app
