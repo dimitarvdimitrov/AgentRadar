@@ -107,6 +107,31 @@ final class ClaudeStatusRulesTests: XCTestCase {
         XCTAssertNil(ClaudeStatusRules.lastRelevantEntry(inTranscriptTail: "\n\n"))
     }
 
+    // A session spawned in one directory can move to another (e.g. into a
+    // worktree) — the process cwd stays at the spawn dir, but Claude stamps
+    // every transcript entry with the session's live cwd. The display
+    // directory must come from the entry, not the process.
+    func testSessionWorkingDirectoryComesFromLastRelevantEntry() {
+        let tail = """
+        {"type":"user","cwd":"/Users/dimitar/documents/spiraldb","message":{"role":"user"}}
+        {"type":"assistant","cwd":"/Users/dimitar/Documents/fix-empty-block-sizes-deserialize","message":{"stop_reason":"end_turn"}}
+        {"type":"system","subtype":"turn_duration"}
+        """
+
+        let entry = ClaudeStatusRules.lastRelevantEntry(inTranscriptTail: tail)!
+        XCTAssertEqual(
+            ClaudeStatusRules.sessionWorkingDirectory(fromEntry: entry),
+            "/Users/dimitar/Documents/fix-empty-block-sizes-deserialize"
+        )
+    }
+
+    func testSessionWorkingDirectoryRejectsMissingOrRelativeCwd() {
+        XCTAssertNil(ClaudeStatusRules.sessionWorkingDirectory(fromEntry: ["type": "user"]))
+        XCTAssertNil(ClaudeStatusRules.sessionWorkingDirectory(fromEntry: ["type": "user", "cwd": ""]))
+        XCTAssertNil(ClaudeStatusRules.sessionWorkingDirectory(fromEntry: ["type": "user", "cwd": "relative/path"]))
+        XCTAssertNil(ClaudeStatusRules.sessionWorkingDirectory(fromEntry: ["type": "user", "cwd": 42]))
+    }
+
     func testSessionIDParsing() {
         let uuid = "e60e9da2-8e36-413e-a9e6-57c6596d1f62"
 

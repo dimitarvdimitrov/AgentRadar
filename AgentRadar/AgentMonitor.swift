@@ -450,6 +450,12 @@ class AgentMonitor: ObservableObject {
             }
         }
 
+        // A claude session's display directory follows the transcript cwd
+        // (set during status scans), not the process cwd — don't clobber it.
+        if target.kind.binaryName == "claude", target.workingDirectory.hasPrefix("/") {
+            workingDirectory = target.workingDirectory
+        }
+
         if let gitContext = gitContext(for: workingDirectory) {
             gitBranch = gitContext.branch
             gitRepoRoot = gitContext.repoRoot
@@ -976,7 +982,10 @@ class AgentMonitor: ObservableObject {
     ) -> StatusDecision? {
         // Convert working directory to Claude's project dir format:
         // /Users/foo/bar → -Users-foo-bar
-        let projectDirName = agent.workingDirectory.replacingOccurrences(of: "/", with: "-")
+        // Transcripts live under the folder named after the *spawn* directory,
+        // so always derive it from the process cwd — the display directory can
+        // move with the session (worktrees) while the project folder does not.
+        let projectDirName = agent.processWorkingDirectory.replacingOccurrences(of: "/", with: "-")
         let projectDir = NSHomeDirectory() + "/.claude/projects/" + projectDirName
 
         // A session resumed with an explicit id (`claude --resume <uuid>`) keeps
@@ -1007,6 +1016,11 @@ class AgentMonitor: ObservableObject {
             return nil
         }
 
+        if let sessionCwd = ClaudeStatusRules.sessionWorkingDirectory(fromEntry: entry),
+           sessionCwd != agent.workingDirectory {
+            adoptClaudeSessionWorkingDirectory(sessionCwd, for: agent)
+        }
+
         guard let outcome = ClaudeStatusRules.decision(
             entry: entry,
             staleness: staleness,
@@ -1017,6 +1031,24 @@ class AgentMonitor: ObservableObject {
 
         agent.pendingToolCall = outcome.pendingToolCall
         return outcome.decision
+    }
+
+    /// Adopt the session cwd stamped on the transcript as the display
+    /// directory. Costs nothing extra: the entry is already parsed for the
+    /// status decision. The process cwd (which anchors transcript matching)
+    /// stays untouched; git context is re-resolved off the main queue.
+    private func adoptClaudeSessionWorkingDirectory(_ sessionCwd: String, for agent: DetectedAgent) {
+        agent.workingDirectory = sessionCwd
+        if let cached = detailCacheByIdentity[agent.processIdentity] {
+            detailCacheByIdentity[agent.processIdentity] = AgentDetailCacheEntry(
+                processWorkingDirectory: cached.processWorkingDirectory,
+                workingDirectory: sessionCwd,
+                codexSessionPath: cached.codexSessionPath,
+                gitBranch: cached.gitBranch,
+                gitRepoRoot: cached.gitRepoRoot
+            )
+        }
+        scheduleDetailHydration(for: [agent])
     }
 
     /// Locate the transcript for a specific session id, checking the cwd-derived
@@ -1071,7 +1103,7 @@ class AgentMonitor: ObservableObject {
             .filter {
                 $0.kind.binaryName == "claude"
                     && $0.processIdentity != agent.processIdentity
-                    && $0.workingDirectory == agent.workingDirectory
+                    && $0.processWorkingDirectory == agent.processWorkingDirectory
             }
             .map(\.startTime)
 

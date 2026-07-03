@@ -151,6 +151,15 @@ enum ClaudeStatusRules {
         }
     }
 
+    /// The session's live working directory as stamped on a transcript entry.
+    /// Claude Code records the session cwd on every user/assistant entry; it
+    /// moves when the session changes directory (e.g. into a worktree) while
+    /// the process cwd stays at the spawn directory.
+    static func sessionWorkingDirectory(fromEntry entry: [String: Any]) -> String? {
+        guard let cwd = entry["cwd"] as? String, cwd.hasPrefix("/") else { return nil }
+        return cwd
+    }
+
     /// Session id explicitly pinned on the claude command line via
     /// `--resume <uuid>`, `-r <uuid>`, or `--session-id <uuid>`.
     /// Returns nil for the bare `--resume` picker form.
