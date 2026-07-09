@@ -2,6 +2,8 @@
 
 A native macOS menu bar app that monitors AI coding agents running in your terminals — Claude Code, Gemini CLI, Codex CLI, Aider, and more.
 
+![The AgentRadar popover showing active and ready agent sessions](screenshots/popover.png)
+
 ## What it does
 
 - **Lives in your menu bar** — shows a compact breakdown of needs input, in progress, and ready sessions
@@ -27,6 +29,8 @@ A native macOS menu bar app that monitors AI coding agents running in your termi
 To add more: edit `KnownAgent.all` in `AgentMonitor.swift`.
 
 ## Menu Bar Icon
+
+![The AgentRadar icon in the macOS menu bar](screenshots/menubar.png)
 
 The menu bar icon uses vertical bars for the current session mix:
 
