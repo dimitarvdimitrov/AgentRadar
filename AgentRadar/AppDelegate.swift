@@ -4,7 +4,7 @@ import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
-    var popover: NSPopover?
+    private var popoverLifecycle: PopoverContentLifecycle?
     var monitor: AgentMonitor?
     var animationTimer: Timer?
     var animFrame = 0
@@ -25,11 +25,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.imagePosition = .imageOnly
         }
 
-        popover = NSPopover()
-        popover?.contentSize = NSSize(width: 340, height: 480)
-        popover?.behavior = .transient
-        popover?.animates = true
-        popover?.delegate = self
+        let popover = NSPopover()
+        popover.contentSize = NSSize(width: 340, height: 480)
+        popover.behavior = .transient
+        popover.animates = true
+        popoverLifecycle = PopoverContentLifecycle(popover: popover) { [weak self] in
+            guard let monitor = self?.monitor else { return nil }
+            return NSHostingController(rootView: PopoverView(monitor: monitor))
+        }
 
         monitor = AgentMonitor()
         monitor?.onUpdate = { [weak self] agents in
@@ -266,23 +269,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func togglePopover() {
-        guard let button = statusItem?.button, let popover = popover else { return }
+        guard let button = statusItem?.button,
+              let lifecycle = popoverLifecycle else { return }
+        let popover = lifecycle.popover
         if popover.isShown {
             popover.performClose(nil)
         } else {
             monitor?.prepareForPopoverOpen()
-            if let monitor {
-                popover.contentViewController = NSHostingController(rootView: PopoverView(monitor: monitor))
-            }
+            guard lifecycle.prepareToOpen() else { return }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             monitor?.refreshPopoverDetails()
             NSApp.activate(ignoringOtherApps: true)
         }
-    }
-}
-
-extension AppDelegate: NSPopoverDelegate {
-    func popoverDidClose(_ notification: Notification) {
-        popover?.contentViewController = nil
     }
 }

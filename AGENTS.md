@@ -9,6 +9,8 @@
   matching, count summaries) with no file, process, or UI dependencies.
   `AgentMonitor.swift` does the I/O around it; `AppDelegate.swift` and
   `PopoverView.swift` render it.
+- `AgentRadar/AppLifecycle/` holds the AppKit popover content lifecycle so it
+  can be tested without launching the app.
 
 ## Code Structure Rules
 
@@ -25,9 +27,9 @@
 
 ## Testing
 
-- `swift test` from the repo root runs the core test suite in
-  `Tests/AgentRadarCoreTests/`. It compiles `AgentRadar/Core/` as a SwiftPM
-  package, independent of Xcode.
+- `swift test` from the repo root runs the Core tests in
+  `Tests/AgentRadarCoreTests/` and popover lifecycle tests in
+  `Tests/AgentRadarPopoverLifecycleTests/` as SwiftPM targets.
 - CI (`.github/workflows/ci.yml`) runs `swift test` plus a Release
   `xcodebuild` on every push and PR.
 - `scripts/reinstall-app.sh` also runs `swift test` before building, and

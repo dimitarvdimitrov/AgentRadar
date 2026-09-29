@@ -18,6 +18,7 @@
 		A010 /* CodexStatusRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = B010 /* CodexStatusRules.swift */; };
 		A011 /* SessionMatching.swift in Sources */ = {isa = PBXBuildFile; fileRef = B011 /* SessionMatching.swift */; };
 		A012 /* SessionStatusSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = B012 /* SessionStatusSummary.swift */; };
+		A013 /* PopoverContentLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B013 /* PopoverContentLifecycle.swift */; };
 		AABB001122334456 /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABB001122334455 /* UpdateChecker.swift */; };
 /* End PBXBuildFile section */
 
@@ -35,6 +36,7 @@
 		B010 /* CodexStatusRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexStatusRules.swift; sourceTree = "<group>"; };
 		B011 /* SessionMatching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMatching.swift; sourceTree = "<group>"; };
 		B012 /* SessionStatusSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStatusSummary.swift; sourceTree = "<group>"; };
+		B013 /* PopoverContentLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverContentLifecycle.swift; sourceTree = "<group>"; };
 		AABB001122334455 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -61,6 +63,7 @@
 			children = (
 				B006 /* Assets.xcassets */,
 				D003 /* Core */,
+				D004 /* AppLifecycle */,
 				B001 /* AgentRadarApp.swift */,
 				B002 /* AppDelegate.swift */,
 				AABB001122334455 /* UpdateChecker.swift */,
@@ -82,6 +85,14 @@
 				B012 /* SessionStatusSummary.swift */,
 			);
 			path = Core;
+			sourceTree = "<group>";
+		};
+		D004 /* AppLifecycle */ = {
+			isa = PBXGroup;
+			children = (
+				B013 /* PopoverContentLifecycle.swift */,
+			);
+			path = AppLifecycle;
 			sourceTree = "<group>";
 		};
 		D002 /* Products */ = {
@@ -164,6 +175,7 @@
 				A006 /* ProcessInspection.swift in Sources */,
 				A011 /* SessionMatching.swift in Sources */,
 				A012 /* SessionStatusSummary.swift in Sources */,
+				A013 /* PopoverContentLifecycle.swift in Sources */,
 				A004 /* PopoverView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
