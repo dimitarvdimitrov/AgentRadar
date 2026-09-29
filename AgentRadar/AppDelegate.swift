@@ -29,6 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover?.contentSize = NSSize(width: 340, height: 480)
         popover?.behavior = .transient
         popover?.animates = true
+        popover?.delegate = self
 
         monitor = AgentMonitor()
         monitor?.onUpdate = { [weak self] agents in
@@ -37,9 +38,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         monitor?.start()
-
-        let contentView = PopoverView(monitor: monitor!)
-        popover?.contentViewController = NSHostingController(rootView: contentView)
 
         // Check for updates
         UpdateChecker.shared.checkOnLaunch()
@@ -273,9 +271,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             monitor?.prepareForPopoverOpen()
+            if let monitor {
+                popover.contentViewController = NSHostingController(rootView: PopoverView(monitor: monitor))
+            }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             monitor?.refreshPopoverDetails()
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+}
+
+extension AppDelegate: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        popover?.contentViewController = nil
     }
 }

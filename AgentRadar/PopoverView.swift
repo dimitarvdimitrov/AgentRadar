@@ -193,7 +193,7 @@ private struct BranchSection: Identifiable {
 struct PopoverView: View {
     @ObservedObject var monitor: AgentMonitor
     @AppStorage("popoverSessionListMode") private var sessionListModeRawValue = SessionListMode.flat.rawValue
-    @State private var expandedSectionID: String?
+    @AppStorage("popoverExpandedSectionID") private var expandedSectionID = ""
 
     private var sessionListMode: SessionListMode {
         SessionListMode(rawValue: sessionListModeRawValue) ?? .flat
@@ -267,7 +267,7 @@ struct PopoverView: View {
     private func toggleSection(_ section: BranchSection) {
         withAnimation(.easeInOut(duration: 0.16)) {
             if expandedSectionID == section.id {
-                expandedSectionID = nil
+                expandedSectionID = ""
             } else {
                 expandedSectionID = section.id
             }
@@ -275,11 +275,11 @@ struct PopoverView: View {
     }
 
     private func reconcileExpandedSection() {
-        guard let expandedSectionID else { return }
+        guard !expandedSectionID.isEmpty else { return }
 
         let sectionStillExists = branchSections.contains { $0.id == expandedSectionID }
         if !sectionStillExists {
-            self.expandedSectionID = nil
+            self.expandedSectionID = ""
         }
     }
 }
